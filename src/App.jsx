@@ -425,7 +425,7 @@ function EmployeeFlow({ employees }) {
               Mamam <span className="text-orange-500">Ayam</span>
             </span>
           </div>
-          <p className="text-stone-400 text-sm">Absen Pegawai</p>
+          <p className="text-stone-400 text-sm">Absen Pegawai Mamam Ayam</p>
         </div>
 
         <div className="relative h-0">
