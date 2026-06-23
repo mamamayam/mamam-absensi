@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Absensi Karyawan — Mamam Ayam
 
 Web ringan buat karyawan absen masuk/pulang dari HP masing-masing. Terpisah
@@ -58,3 +59,6 @@ Buka `http://localhost:5173`.
   masing-masing generate kode sendiri).
 - Kompresi foto cuma di sisi browser (canvas) — kalau HP karyawan jadul
   banget, proses kompres bisa agak lambat, tapi tetap jalan.
+=======
+# mamam-absensi
+>>>>>>> f4fd87ee7825c5395171b2a0d7ace0981a294015
