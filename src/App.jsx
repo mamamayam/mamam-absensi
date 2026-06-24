@@ -181,11 +181,13 @@ function EmployeeFlow({ employees }) {
   };
 
   const verifyPin = () => {
-    const entered = pin.join('');
     if (!employee?.pin) {
-      setPinError('PIN belum diatur untuk akun ini. Hubungi admin toko.');
+      // Karyawan belum punya PIN → lewati step ini, lanjut ke OTP
+      setPinVerified(true);
+      setStep(3);
       return;
     }
+    const entered = pin.join('');
     if (entered !== String(employee.pin)) {
       setPinError('PIN salah. Coba lagi.');
       setPin(['', '', '', '']);
@@ -193,7 +195,7 @@ function EmployeeFlow({ employees }) {
       return;
     }
     setPinVerified(true);
-    setStep(3); // lanjut ke OTP
+    setStep(3);
   };
 
   // Auto-verifikasi PIN begitu 4 digit lengkap
@@ -809,7 +811,7 @@ function EmployeeFlow({ employees }) {
           <div className="flex gap-2 mt-6">
             {step > 1 && (
               <button
-                onClick={() => setStep(step - 1)}
+                onClick={() => setStep(step === 3 && !employee?.pin ? 1 : step - 1)}
                 className="px-4 py-3 rounded-xl border border-stone-200 text-stone-500 hover:bg-stone-50"
               >
                 <ChevronLeft className="w-5 h-5" />
@@ -818,7 +820,10 @@ function EmployeeFlow({ employees }) {
             {step < 5 ? (
               <button
                 onClick={() => {
-                  if (step === 2) {
+                  if (step === 1) {
+                    // Lewati step PIN kalau karyawan belum punya PIN
+                    setStep(employee?.pin ? 2 : 3);
+                  } else if (step === 2) {
                     pinVerified ? setStep(3) : verifyPin();
                   } else if (step === 3) {
                     otpVerified ? setStep(4) : verifyOtp();
@@ -827,7 +832,7 @@ function EmployeeFlow({ employees }) {
                   }
                 }}
                 disabled={
-                  step === 2 ? !pin.every((d) => d !== '') :
+                  step === 2 ? (!employee?.pin ? false : !pin.every((d) => d !== '')) :
                   step === 3 ? (!otp.every((d) => d !== '') || otpChecking) :
                   !canNext[step]
                 }
