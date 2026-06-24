@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  User, KeyRound, Camera, MapPin, CheckCircle2, AlertTriangle,
+  User, Camera, MapPin, CheckCircle2, AlertTriangle,
   ChevronLeft, ChevronRight, Loader2, RotateCcw, Flame,
-  LogIn, LogOut, ShieldCheck, Search, Lock, Coffee,
+  LogOut, ShieldCheck, Search, Coffee,
 } from 'lucide-react';
 import { supabase, isConfigured } from './supabase.js';
 import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } from './utils.js';
@@ -15,15 +15,13 @@ const OUTLET_LAT = Number(import.meta.env.VITE_OUTLET_LAT) || -6.2607;
 const OUTLET_LNG = Number(import.meta.env.VITE_OUTLET_LNG) || 106.8133;
 const OUTLET_RADIUS_M = Number(import.meta.env.VITE_OUTLET_RADIUS_M) || 100;
 
-const OTP_GRACE_MS = 5000; // toleransi delay network/jam device pas cek expired
 const PHOTO_BUCKET = 'attendance-photos';
 
+// 3 langkah: Nama → Selfie → Lokasi (tanpa OTP, tanpa PIN)
 const STEPS = [
   { id: 1, label: 'Nama', icon: User },
-  { id: 2, label: 'PIN', icon: Lock },      // Step baru: verifikasi PIN karyawan
-  { id: 3, label: 'OTP', icon: KeyRound },
-  { id: 4, label: 'Selfie', icon: Camera },
-  { id: 5, label: 'Lokasi', icon: MapPin },
+  { id: 2, label: 'Selfie', icon: Camera },
+  { id: 3, label: 'Lokasi', icon: MapPin },
 ];
 
 function CenteredMessage({ children }) {
@@ -89,9 +87,9 @@ export default function App() {
 }
 
 /**
- * EmployeeFlow — stepper 4 langkah (Nama → OTP → Selfie → Lokasi), berbasis
- * desain mockup asli. Bedanya dari mockup: semua tahap nyambung ke data asli
- * (Supabase), bukan simulasi.
+ * EmployeeFlow — stepper 3 langkah (Nama → Selfie → Lokasi).
+ * Tidak ada PIN, tidak ada OTP. Berlaku untuk semua tipe absen:
+ * masuk, jam bolong (ijin keluar sementara), maupun pulang.
  */
 function EmployeeFlow({ employees }) {
   const [step, setStep] = useState(1);
@@ -100,28 +98,15 @@ function EmployeeFlow({ employees }) {
   // Step 1 — pilih nama
   const [search, setSearch] = useState('');
   const [employee, setEmployee] = useState(null);
-  const [todayStatus, setTodayStatus] = useState(null); // { hasMasuk, hasKeluar }
+  const [todayStatus, setTodayStatus] = useState(null); // { hasMasuk, hasKeluar, lastType }
   const [checkingStatus, setCheckingStatus] = useState(false);
 
-  // Step 2 — PIN karyawan (verifikasi identitas sebelum lanjut ke OTP)
-  const [pin, setPin] = useState(['', '', '', '']);
-  const [pinVerified, setPinVerified] = useState(false);
-  const [pinError, setPinError] = useState('');
-  const pinRefs = useRef([]);
-
-  // Step 3 — OTP
-  const [otp, setOtp] = useState(['', '', '', '', '', '']);
-  const [otpVerified, setOtpVerified] = useState(false);
-  const [otpChecking, setOtpChecking] = useState(false);
-  const [otpError, setOtpError] = useState('');
-  const otpRefs = useRef([]);
-
-  // Step 3 — selfie
+  // Step 2 — selfie
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreview, setPhotoPreview] = useState(null);
   const fileInputRef = useRef(null);
 
-  // Step 4 — GPS
+  // Step 3 — GPS
   const [gpsStatus, setGpsStatus] = useState('idle'); // idle | checking | near | far | denied
   const [distance, setDistance] = useState(null);
 
@@ -155,119 +140,15 @@ function EmployeeFlow({ employees }) {
       const hasKeluar = activeToday.some((p) => p.type === 'keluar');
       setTodayStatus({ hasMasuk, hasKeluar, lastType });
 
-      // Default tipe absen berdasarkan state terakhir:
-      // belum ada / setelah bolong → masuk; sedang masuk → keluar (bisa ganti ke bolong via tab)
+      // Default tipe absen berdasarkan state terakhir
       if (!lastType || lastType === 'bolong') setAbsenType('masuk');
       else if (lastType === 'masuk') setAbsenType('keluar');
-      // lastType === 'keluar' → sudahLengkapHariIni handles it
     } finally {
       setCheckingStatus(false);
     }
   };
 
-  // --- Step 2: PIN karyawan ---
-  const handlePinChange = (idx, val) => {
-    if (!/^[0-9]?$/.test(val)) return;
-    const next = [...pin];
-    next[idx] = val;
-    setPin(next);
-    setPinVerified(false);
-    setPinError('');
-    if (val && idx < 3) pinRefs.current[idx + 1]?.focus();
-  };
-
-  const handlePinKeyDown = (idx, e) => {
-    if (e.key === 'Backspace' && !pin[idx] && idx > 0) pinRefs.current[idx - 1]?.focus();
-  };
-
-  const verifyPin = () => {
-    if (!employee?.pin) {
-      // Karyawan belum punya PIN → lewati step ini, lanjut ke OTP
-      setPinVerified(true);
-      setStep(3);
-      return;
-    }
-    const entered = pin.join('');
-    if (entered !== String(employee.pin)) {
-      setPinError('PIN salah. Coba lagi.');
-      setPin(['', '', '', '']);
-      setTimeout(() => pinRefs.current[0]?.focus(), 50);
-      return;
-    }
-    setPinVerified(true);
-    setStep(3);
-  };
-
-  // Auto-verifikasi PIN begitu 4 digit lengkap
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (step === 2 && pin.every((d) => d !== '') && !pinVerified) {
-      verifyPin();
-    }
-  }, [pin, step]);
-
-  // --- Step 3: OTP ---
-  // Validasi OTP LANGSUNG di sini, begitu 6 digit lengkap — JANGAN ditunda
-  // sampai submit di step 4. Kalau ditunda, kode (yang cuma valid 30 detik)
-  // hampir pasti udah expired pas user kelar foto+GPS, jadinya keliatan
-  // "kode salah" padahal sebenarnya gak ada masalah sama kodenya.
-  const handleOtpChange = (idx, val) => {
-    if (!/^[0-9]?$/.test(val)) return;
-    const next = [...otp];
-    next[idx] = val;
-    setOtp(next);
-    setOtpVerified(false);
-    setOtpError('');
-    if (val && idx < 5) otpRefs.current[idx + 1]?.focus();
-  };
-  const handleOtpKeyDown = (idx, e) => {
-    if (e.key === 'Backspace' && !otp[idx] && idx > 0) otpRefs.current[idx - 1]?.focus();
-  };
-
-  const verifyOtp = async () => {
-    setOtpChecking(true);
-    setOtpError('');
-    try {
-      const { data: otpRow, error } = await supabase
-        .from('app_config')
-        .select('value')
-        .eq('key', 'attendanceOtp')
-        .maybeSingle();
-
-      if (error || !otpRow?.value) {
-        setOtpError('Kode belum tersedia. Minta kasir buka layar Absensi dulu.');
-        return;
-      }
-      const otpVal = otpRow.value;
-      if (String(otpVal.code) !== otp.join('')) {
-        setOtpError('Kode salah. Cek lagi kode yang tampil di layar kasir.');
-        return;
-      }
-      if (new Date(otpVal.expiresAt).getTime() + OTP_GRACE_MS < Date.now()) {
-        setOtpError('Kode sudah ganti. Lihat kode terbaru di layar kasir, lalu coba lagi.');
-        return;
-      }
-      // Valid — begitu lolos di sini, OTP dianggap selesai diverifikasi.
-      // Foto/GPS sesudah ini boleh makan waktu berapa lama pun, gak akan
-      // bikin OTP "expired" lagi karena gak dicek ulang di submit.
-      setOtpVerified(true);
-      setStep(3);
-    } catch (_) {
-      setOtpError('Ada gangguan koneksi. Coba lagi.');
-    } finally {
-      setOtpChecking(false);
-    }
-  };
-
-  // Auto-validasi OTP begitu 6 digit lengkap (step OTP sekarang step 3)
-  useEffect(() => {
-    if (step === 3 && otp.every((d) => d !== '') && !otpVerified && !otpChecking) {
-      verifyOtp();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [otp, step]);
-
-  // --- Step 3: selfie ---
+  // --- Step 2: selfie ---
   const handlePickPhoto = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -275,7 +156,7 @@ function EmployeeFlow({ employees }) {
     setPhotoPreview(URL.createObjectURL(file));
   };
 
-  // --- Step 4: GPS ---
+  // --- Step 3: GPS ---
   const checkGps = () => {
     if (!navigator.geolocation) {
       setGpsStatus('denied');
@@ -295,8 +176,9 @@ function EmployeeFlow({ employees }) {
     );
   };
 
+  // Auto-scan GPS begitu masuk step 3
   useEffect(() => {
-    if (step === 5 && gpsStatus === 'idle') checkGps();
+    if (step === 3 && gpsStatus === 'idle') checkGps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
@@ -304,25 +186,15 @@ function EmployeeFlow({ employees }) {
 
   const canNext = {
     1: !!employee && !checkingStatus && !sudahLengkapHariIni,
-    2: pinVerified,
-    3: otpVerified,
-    4: !!photoFile,
-    5: gpsStatus === 'near' || gpsStatus === 'far',
+    2: !!photoFile,
+    3: gpsStatus === 'near' || gpsStatus === 'far',
   };
 
   const handleSubmit = async () => {
-    // Guard defensif — seharusnya gak pernah ke-trigger lewat alur UI normal,
-    // tapi jaga-jaga kalau ada cara aneh buat nyampe step 4 tanpa OTP valid.
-    if (!otpVerified) {
-      setSubmitError('Kode OTP belum diverifikasi.');
-      setStep(3);
-      return;
-    }
-
     setSubmitting(true);
     setSubmitError('');
     try {
-      // 1) Cek status hari ini (bisa berubah selama proses absen jalan)
+      // Cek status hari ini (bisa berubah selama proses absen jalan)
       const todayStr = getTodayStr();
       const { data: rows, error: logErr } = await supabase
         .from('attendanceLog')
@@ -340,7 +212,7 @@ function EmployeeFlow({ employees }) {
       const hasMasuk = activeToday.some((p) => p.type === 'masuk');
       const hasKeluar = activeToday.some((p) => p.type === 'keluar');
 
-      // Validasi transisi state: undefined → masuk; masuk → keluar|bolong; bolong → masuk
+      // Validasi transisi state
       if (absenType === 'masuk' && lastType === 'masuk') {
         setSubmitError('Kamu sudah absen masuk dan masih bekerja.');
         return;
@@ -374,8 +246,7 @@ function EmployeeFlow({ employees }) {
         }
       }
 
-      // 2) Upload foto (kompres dulu biar kecil) — kalau gagal, absen tetap
-      // lanjut tanpa foto daripada karyawan gagal absen gara-gara upload.
+      // Upload foto (kompres dulu) — kalau gagal, absen tetap lanjut tanpa foto
       let photoUrl = null;
       try {
         const compressed = await compressImage(photoFile);
@@ -388,10 +259,10 @@ function EmployeeFlow({ employees }) {
           photoUrl = pub?.publicUrl ?? null;
         }
       } catch (_) {
-        // diemin — foto opsional, jangan blokir absen
+        // foto opsional, jangan blokir absen
       }
 
-      // 3) Simpan record absen
+      // Simpan record absen
       const flagged = gpsStatus === 'far';
       const nowIso = new Date().toISOString();
       const recordId = generateId();
@@ -435,13 +306,6 @@ function EmployeeFlow({ employees }) {
     setSearch('');
     setTodayStatus(null);
     setAbsenType('masuk');
-    setPin(['', '', '', '']);
-    setPinVerified(false);
-    setPinError('');
-    setOtp(['', '', '', '', '', '']);
-    setOtpVerified(false);
-    setOtpChecking(false);
-    setOtpError('');
     setPhotoFile(null);
     setPhotoPreview(null);
     setGpsStatus('idle');
@@ -553,6 +417,7 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
+          {/* Progress steps */}
           <div className="flex items-center justify-between mb-6">
             {STEPS.map((s, i) => {
               const Icon = s.icon;
@@ -579,6 +444,7 @@ function EmployeeFlow({ employees }) {
             })}
           </div>
 
+          {/* Step 1: Pilih Nama */}
           {step === 1 && (
             <div className="space-y-3">
               <label className="text-sm font-medium text-stone-700 block">Pilih Nama Kamu</label>
@@ -626,84 +492,8 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
+          {/* Step 2: Selfie */}
           {step === 2 && (
-            <div className="space-y-4">
-              <div>
-                <label className="text-sm font-medium text-stone-700 block mb-1">
-                  PIN Kamu
-                </label>
-                <p className="text-xs text-stone-400 mb-3">
-                  Masukkan 4 digit PIN yang diberikan admin toko
-                </p>
-                <div className="flex gap-3 justify-center">
-                  {pin.map((d, i) => (
-                    <input
-                      key={i}
-                      ref={(el) => (pinRefs.current[i] = el)}
-                      value={d}
-                      onChange={(e) => handlePinChange(i, e.target.value)}
-                      onKeyDown={(e) => handlePinKeyDown(i, e)}
-                      maxLength={1}
-                      inputMode="numeric"
-                      type="password"
-                      className="w-12 h-14 text-center text-xl font-mono font-bold border-2 border-stone-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
-                    />
-                  ))}
-                </div>
-              </div>
-              {pinVerified && (
-                <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 px-3 py-2 rounded-lg">
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> PIN benar.
-                </div>
-              )}
-              {pinError && (
-                <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {pinError}
-                </div>
-              )}
-            </div>
-          )}
-
-          {step === 3 && (
-            <div className="space-y-4">
-              <div>
-                <label className="text-sm font-medium text-stone-700 block mb-1.5">Kode OTP</label>
-                <p className="text-xs text-stone-400 mb-3">Lihat kode 6 digit di HP yang standby di outlet</p>
-                <div className="flex gap-2 justify-between">
-                  {otp.map((d, i) => (
-                    <input
-                      key={i}
-                      ref={(el) => (otpRefs.current[i] = el)}
-                      value={d}
-                      onChange={(e) => handleOtpChange(i, e.target.value)}
-                      onKeyDown={(e) => handleOtpKeyDown(i, e)}
-                      maxLength={1}
-                      inputMode="numeric"
-                      disabled={otpChecking}
-                      className="w-10 h-12 text-center text-lg font-mono font-semibold border border-stone-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:opacity-50"
-                    />
-                  ))}
-                </div>
-              </div>
-              {otpChecking && (
-                <div className="flex items-center gap-1.5 text-xs text-stone-400">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Memeriksa kode...
-                </div>
-              )}
-              {otpVerified && !otpChecking && (
-                <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 px-3 py-2 rounded-lg">
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> Kode benar.
-                </div>
-              )}
-              {otpError && (
-                <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {otpError}
-                </div>
-              )}
-            </div>
-          )}
-
-          {step === 4 && (
             <div className="space-y-4">
               <label className="text-sm font-medium text-stone-700 block">Foto Selfie</label>
               <input
@@ -752,7 +542,8 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
-          {step === 5 && (
+          {/* Step 3: Lokasi */}
+          {step === 3 && (
             <div className="space-y-4">
               <label className="text-sm font-medium text-stone-700 block">Verifikasi Lokasi</label>
               <div
@@ -808,48 +599,28 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
+          {/* Navigasi */}
           <div className="flex gap-2 mt-6">
             {step > 1 && (
               <button
-                onClick={() => setStep(step === 3 && !employee?.pin ? 1 : step - 1)}
+                onClick={() => setStep(step - 1)}
                 className="px-4 py-3 rounded-xl border border-stone-200 text-stone-500 hover:bg-stone-50"
               >
                 <ChevronLeft className="w-5 h-5" />
               </button>
             )}
-            {step < 5 ? (
+            {step < 3 ? (
               <button
-                onClick={() => {
-                  if (step === 1) {
-                    // Lewati step PIN kalau karyawan belum punya PIN
-                    setStep(employee?.pin ? 2 : 3);
-                  } else if (step === 2) {
-                    pinVerified ? setStep(3) : verifyPin();
-                  } else if (step === 3) {
-                    otpVerified ? setStep(4) : verifyOtp();
-                  } else {
-                    setStep(step + 1);
-                  }
-                }}
-                disabled={
-                  step === 2 ? (!employee?.pin ? false : !pin.every((d) => d !== '')) :
-                  step === 3 ? (!otp.every((d) => d !== '') || otpChecking) :
-                  !canNext[step]
-                }
+                onClick={() => setStep(step + 1)}
+                disabled={!canNext[step]}
                 className="flex-1 bg-orange-600 disabled:bg-stone-200 disabled:text-stone-400 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-1.5 transition"
               >
-                {step === 3 && otpChecking ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>
-                    Lanjut <ChevronRight className="w-4 h-4" />
-                  </>
-                )}
+                Lanjut <ChevronRight className="w-4 h-4" />
               </button>
             ) : (
               <button
                 onClick={handleSubmit}
-                disabled={!canNext[5] || submitting}
+                disabled={!canNext[3] || submitting}
                 className="flex-1 bg-orange-600 disabled:bg-stone-200 disabled:text-stone-400 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-1.5 transition"
               >
                 {submitting ? (
@@ -863,7 +634,7 @@ function EmployeeFlow({ employees }) {
             )}
           </div>
 
-          {submitError && step === 5 && (
+          {submitError && step === 3 && (
             <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg mt-3">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {submitError}
             </div>
