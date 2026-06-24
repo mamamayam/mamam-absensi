@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
   User, KeyRound, Camera, MapPin, CheckCircle2, AlertTriangle,
   ChevronLeft, ChevronRight, Loader2, RotateCcw, Flame,
-  LogIn, LogOut, ShieldCheck, Search,
+  LogIn, LogOut, ShieldCheck, Search, Lock, Coffee,
 } from 'lucide-react';
 import { supabase, isConfigured } from './supabase.js';
 import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } from './utils.js';
@@ -20,9 +20,10 @@ const PHOTO_BUCKET = 'attendance-photos';
 
 const STEPS = [
   { id: 1, label: 'Nama', icon: User },
-  { id: 2, label: 'OTP', icon: KeyRound },
-  { id: 3, label: 'Selfie', icon: Camera },
-  { id: 4, label: 'Lokasi', icon: MapPin },
+  { id: 2, label: 'PIN', icon: Lock },      // Step baru: verifikasi PIN karyawan
+  { id: 3, label: 'OTP', icon: KeyRound },
+  { id: 4, label: 'Selfie', icon: Camera },
+  { id: 5, label: 'Lokasi', icon: MapPin },
 ];
 
 function CenteredMessage({ children }) {
@@ -102,7 +103,13 @@ function EmployeeFlow({ employees }) {
   const [todayStatus, setTodayStatus] = useState(null); // { hasMasuk, hasKeluar }
   const [checkingStatus, setCheckingStatus] = useState(false);
 
-  // Step 2 — OTP
+  // Step 2 — PIN karyawan (verifikasi identitas sebelum lanjut ke OTP)
+  const [pin, setPin] = useState(['', '', '', '']);
+  const [pinVerified, setPinVerified] = useState(false);
+  const [pinError, setPinError] = useState('');
+  const pinRefs = useRef([]);
+
+  // Step 3 — OTP
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [otpVerified, setOtpVerified] = useState(false);
   const [otpChecking, setOtpChecking] = useState(false);
@@ -141,16 +148,63 @@ function EmployeeFlow({ employees }) {
         .eq('payload->>dateStr', todayStr);
 
       const activeToday = (rows ?? []).map((r) => r.payload).filter((p) => !p.deletedAt);
+      const sorted = activeToday.sort((a, b) => new Date(a.date) - new Date(b.date));
+      const lastRecord = sorted[sorted.length - 1];
+      const lastType = lastRecord?.type ?? null;
       const hasMasuk = activeToday.some((p) => p.type === 'masuk');
       const hasKeluar = activeToday.some((p) => p.type === 'keluar');
-      setTodayStatus({ hasMasuk, hasKeluar });
-      setAbsenType(hasMasuk && !hasKeluar ? 'keluar' : 'masuk');
+      setTodayStatus({ hasMasuk, hasKeluar, lastType });
+
+      // Default tipe absen berdasarkan state terakhir:
+      // belum ada / setelah bolong → masuk; sedang masuk → keluar (bisa ganti ke bolong via tab)
+      if (!lastType || lastType === 'bolong') setAbsenType('masuk');
+      else if (lastType === 'masuk') setAbsenType('keluar');
+      // lastType === 'keluar' → sudahLengkapHariIni handles it
     } finally {
       setCheckingStatus(false);
     }
   };
 
-  // --- Step 2: OTP ---
+  // --- Step 2: PIN karyawan ---
+  const handlePinChange = (idx, val) => {
+    if (!/^[0-9]?$/.test(val)) return;
+    const next = [...pin];
+    next[idx] = val;
+    setPin(next);
+    setPinVerified(false);
+    setPinError('');
+    if (val && idx < 3) pinRefs.current[idx + 1]?.focus();
+  };
+
+  const handlePinKeyDown = (idx, e) => {
+    if (e.key === 'Backspace' && !pin[idx] && idx > 0) pinRefs.current[idx - 1]?.focus();
+  };
+
+  const verifyPin = () => {
+    const entered = pin.join('');
+    if (!employee?.pin) {
+      setPinError('PIN belum diatur untuk akun ini. Hubungi admin toko.');
+      return;
+    }
+    if (entered !== String(employee.pin)) {
+      setPinError('PIN salah. Coba lagi.');
+      setPin(['', '', '', '']);
+      setTimeout(() => pinRefs.current[0]?.focus(), 50);
+      return;
+    }
+    setPinVerified(true);
+    setStep(3); // lanjut ke OTP
+  };
+
+  // Auto-verifikasi PIN begitu 4 digit lengkap
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (step === 2 && pin.every((d) => d !== '') && !pinVerified) {
+      verifyPin();
+    }
+  }, [pin, step]);
+
+  // --- Step 3: OTP ---
   // Validasi OTP LANGSUNG di sini, begitu 6 digit lengkap — JANGAN ditunda
   // sampai submit di step 4. Kalau ditunda, kode (yang cuma valid 30 detik)
   // hampir pasti udah expired pas user kelar foto+GPS, jadinya keliatan
@@ -203,9 +257,9 @@ function EmployeeFlow({ employees }) {
     }
   };
 
-  // Auto-validasi begitu 6 digit lengkap (gak perlu nunggu klik Lanjut)
+  // Auto-validasi OTP begitu 6 digit lengkap (step OTP sekarang step 3)
   useEffect(() => {
-    if (step === 2 && otp.every((d) => d !== '') && !otpVerified && !otpChecking) {
+    if (step === 3 && otp.every((d) => d !== '') && !otpVerified && !otpChecking) {
       verifyOtp();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -240,17 +294,18 @@ function EmployeeFlow({ employees }) {
   };
 
   useEffect(() => {
-    if (step === 4 && gpsStatus === 'idle') checkGps();
+    if (step === 5 && gpsStatus === 'idle') checkGps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
-  const sudahLengkapHariIni = todayStatus?.hasMasuk && todayStatus?.hasKeluar;
+  const sudahLengkapHariIni = todayStatus?.lastType === 'keluar';
 
   const canNext = {
     1: !!employee && !checkingStatus && !sudahLengkapHariIni,
-    2: otpVerified,
-    3: !!photoFile,
-    4: gpsStatus === 'near' || gpsStatus === 'far',
+    2: pinVerified,
+    3: otpVerified,
+    4: !!photoFile,
+    5: gpsStatus === 'near' || gpsStatus === 'far',
   };
 
   const handleSubmit = async () => {
@@ -258,7 +313,7 @@ function EmployeeFlow({ employees }) {
     // tapi jaga-jaga kalau ada cara aneh buat nyampe step 4 tanpa OTP valid.
     if (!otpVerified) {
       setSubmitError('Kode OTP belum diverifikasi.');
-      setStep(2);
+      setStep(3);
       return;
     }
 
@@ -278,20 +333,43 @@ function EmployeeFlow({ employees }) {
         return;
       }
       const activeToday = (rows ?? []).map((r) => r.payload).filter((p) => !p.deletedAt);
+      const sorted = activeToday.sort((a, b) => new Date(a.date) - new Date(b.date));
+      const lastType = sorted[sorted.length - 1]?.type ?? null;
       const hasMasuk = activeToday.some((p) => p.type === 'masuk');
       const hasKeluar = activeToday.some((p) => p.type === 'keluar');
 
-      if (absenType === 'masuk' && hasMasuk) {
-        setSubmitError('Kamu sudah absen masuk hari ini.');
+      // Validasi transisi state: undefined → masuk; masuk → keluar|bolong; bolong → masuk
+      if (absenType === 'masuk' && lastType === 'masuk') {
+        setSubmitError('Kamu sudah absen masuk dan masih bekerja.');
         return;
       }
-      if (absenType === 'keluar' && !hasMasuk) {
-        setSubmitError('Belum absen masuk, jadi belum bisa absen keluar.');
+      if (absenType === 'masuk' && lastType === 'keluar') {
+        setSubmitError('Kamu sudah selesai shift hari ini.');
         return;
       }
-      if (absenType === 'keluar' && hasKeluar) {
-        setSubmitError('Kamu sudah absen keluar hari ini.');
-        return;
+      if (absenType === 'bolong') {
+        if (lastType !== 'masuk') {
+          setSubmitError(
+            !lastType ? 'Belum absen masuk, tidak bisa ijin bolong.' :
+            lastType === 'bolong' ? 'Masih dalam jam bolong, absen masuk dulu.' :
+            'Tidak bisa ijin bolong setelah absen keluar.',
+          );
+          return;
+        }
+      }
+      if (absenType === 'keluar') {
+        if (!hasMasuk) {
+          setSubmitError('Belum absen masuk, jadi belum bisa absen keluar.');
+          return;
+        }
+        if (lastType === 'bolong') {
+          setSubmitError('Absen masuk dulu setelah jam bolong sebelum bisa pulang.');
+          return;
+        }
+        if (hasKeluar) {
+          setSubmitError('Kamu sudah absen keluar hari ini.');
+          return;
+        }
       }
 
       // 2) Upload foto (kompres dulu biar kecil) — kalau gagal, absen tetap
@@ -354,6 +432,10 @@ function EmployeeFlow({ employees }) {
     setEmployee(null);
     setSearch('');
     setTodayStatus(null);
+    setAbsenType('masuk');
+    setPin(['', '', '', '']);
+    setPinVerified(false);
+    setPinError('');
     setOtp(['', '', '', '', '', '']);
     setOtpVerified(false);
     setOtpChecking(false);
@@ -373,17 +455,21 @@ function EmployeeFlow({ employees }) {
         <div className="bg-white rounded-3xl shadow-xl max-w-sm w-full p-8 text-center">
           <div
             className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${
-              done.flagged ? 'bg-amber-100' : 'bg-green-100'
+              done.type === 'bolong' ? 'bg-amber-100' : done.flagged ? 'bg-amber-100' : 'bg-green-100'
             }`}
           >
-            {done.flagged ? (
+            {done.type === 'bolong' ? (
+              <Coffee className="w-9 h-9 text-amber-600" />
+            ) : done.flagged ? (
               <AlertTriangle className="w-9 h-9 text-amber-600" />
             ) : (
               <CheckCircle2 className="w-9 h-9 text-green-600" />
             )}
           </div>
           <h2 className="text-xl font-bold text-stone-800 mb-1">
-            Absen {done.type === 'masuk' ? 'Masuk' : 'Keluar'} Tercatat
+            {done.type === 'masuk' ? 'Absen Masuk Tercatat' :
+             done.type === 'bolong' ? 'Jam Bolong Tercatat' :
+             'Absen Pulang Tercatat'}
           </h2>
           <p className="text-stone-500 text-sm font-mono mb-1">{formatTime(done.time)} WIB</p>
           {done.flagged && (
@@ -435,26 +521,35 @@ function EmployeeFlow({ employees }) {
         </div>
 
         <div className="bg-white rounded-b-3xl shadow-xl p-5 pt-6">
-          <div className="flex bg-stone-100 rounded-xl p-1 mb-5">
-            <button
-              onClick={() => setAbsenType('masuk')}
-              disabled={todayStatus?.hasMasuk}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition disabled:opacity-40 disabled:cursor-not-allowed ${
-                absenType === 'masuk' ? 'bg-white shadow text-orange-700' : 'text-stone-500'
-              }`}
-            >
-              <LogIn className="w-4 h-4" /> Absen Masuk
-            </button>
-            <button
-              onClick={() => setAbsenType('keluar')}
-              disabled={!todayStatus?.hasMasuk || todayStatus?.hasKeluar}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition disabled:opacity-40 disabled:cursor-not-allowed ${
-                absenType === 'keluar' ? 'bg-white shadow text-orange-700' : 'text-stone-500'
-              }`}
-            >
-              <LogOut className="w-4 h-4" /> Absen Keluar
-            </button>
-          </div>
+          {/* Pilihan tipe absen — dinamis sesuai status karyawan */}
+          {todayStatus?.lastType === 'masuk' && !sudahLengkapHariIni && (
+            <div className="flex bg-stone-100 rounded-xl p-1 mb-5">
+              <button
+                onClick={() => setAbsenType('bolong')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
+                  absenType === 'bolong' ? 'bg-white shadow text-amber-700' : 'text-stone-500'
+                }`}
+              >
+                <Coffee className="w-4 h-4" /> Jam Bolong
+              </button>
+              <button
+                onClick={() => setAbsenType('keluar')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
+                  absenType === 'keluar' ? 'bg-white shadow text-orange-700' : 'text-stone-500'
+                }`}
+              >
+                <LogOut className="w-4 h-4" /> Pulang
+              </button>
+            </div>
+          )}
+          {todayStatus?.lastType === 'bolong' && !sudahLengkapHariIni && (
+            <div className="flex items-center gap-2.5 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-3 mb-5">
+              <Coffee className="w-4 h-4 text-amber-600 shrink-0" />
+              <p className="text-xs text-amber-700 font-medium leading-relaxed">
+                Kamu sedang dalam <span className="font-bold">jam bolong</span>. Absen masuk lagi untuk melanjutkan shift.
+              </p>
+            </div>
+          )}
 
           <div className="flex items-center justify-between mb-6">
             {STEPS.map((s, i) => {
@@ -532,6 +627,44 @@ function EmployeeFlow({ employees }) {
           {step === 2 && (
             <div className="space-y-4">
               <div>
+                <label className="text-sm font-medium text-stone-700 block mb-1">
+                  PIN Kamu
+                </label>
+                <p className="text-xs text-stone-400 mb-3">
+                  Masukkan 4 digit PIN yang diberikan admin toko
+                </p>
+                <div className="flex gap-3 justify-center">
+                  {pin.map((d, i) => (
+                    <input
+                      key={i}
+                      ref={(el) => (pinRefs.current[i] = el)}
+                      value={d}
+                      onChange={(e) => handlePinChange(i, e.target.value)}
+                      onKeyDown={(e) => handlePinKeyDown(i, e)}
+                      maxLength={1}
+                      inputMode="numeric"
+                      type="password"
+                      className="w-12 h-14 text-center text-xl font-mono font-bold border-2 border-stone-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
+                    />
+                  ))}
+                </div>
+              </div>
+              {pinVerified && (
+                <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 px-3 py-2 rounded-lg">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> PIN benar.
+                </div>
+              )}
+              {pinError && (
+                <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {pinError}
+                </div>
+              )}
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="space-y-4">
+              <div>
                 <label className="text-sm font-medium text-stone-700 block mb-1.5">Kode OTP</label>
                 <p className="text-xs text-stone-400 mb-3">Lihat kode 6 digit di HP yang standby di outlet</p>
                 <div className="flex gap-2 justify-between">
@@ -568,7 +701,7 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
-          {step === 3 && (
+          {step === 4 && (
             <div className="space-y-4">
               <label className="text-sm font-medium text-stone-700 block">Foto Selfie</label>
               <input
@@ -617,7 +750,7 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
-          {step === 4 && (
+          {step === 5 && (
             <div className="space-y-4">
               <label className="text-sm font-medium text-stone-700 block">Verifikasi Lokasi</label>
               <div
@@ -682,19 +815,25 @@ function EmployeeFlow({ employees }) {
                 <ChevronLeft className="w-5 h-5" />
               </button>
             )}
-            {step < 4 ? (
+            {step < 5 ? (
               <button
                 onClick={() => {
                   if (step === 2) {
-                    otpVerified ? setStep(3) : verifyOtp();
+                    pinVerified ? setStep(3) : verifyPin();
+                  } else if (step === 3) {
+                    otpVerified ? setStep(4) : verifyOtp();
                   } else {
                     setStep(step + 1);
                   }
                 }}
-                disabled={step === 2 ? (!otp.every((d) => d !== '') || otpChecking) : !canNext[step]}
+                disabled={
+                  step === 2 ? !pin.every((d) => d !== '') :
+                  step === 3 ? (!otp.every((d) => d !== '') || otpChecking) :
+                  !canNext[step]
+                }
                 className="flex-1 bg-orange-600 disabled:bg-stone-200 disabled:text-stone-400 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-1.5 transition"
               >
-                {step === 2 && otpChecking ? (
+                {step === 3 && otpChecking ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <>
@@ -705,7 +844,7 @@ function EmployeeFlow({ employees }) {
             ) : (
               <button
                 onClick={handleSubmit}
-                disabled={!canNext[4] || submitting}
+                disabled={!canNext[5] || submitting}
                 className="flex-1 bg-orange-600 disabled:bg-stone-200 disabled:text-stone-400 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-1.5 transition"
               >
                 {submitting ? (
@@ -719,7 +858,7 @@ function EmployeeFlow({ employees }) {
             )}
           </div>
 
-          {submitError && step === 4 && (
+          {submitError && step === 5 && (
             <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg mt-3">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {submitError}
             </div>
