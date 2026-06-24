@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import {
   User, Camera, MapPin, CheckCircle2, AlertTriangle,
   ChevronLeft, ChevronRight, Loader2, RotateCcw, Flame,
@@ -225,8 +225,8 @@ function EmployeeFlow({ employees }) {
         if (lastType !== 'masuk') {
           setSubmitError(
             !lastType ? 'Belum absen masuk, tidak bisa ijin bolong.' :
-            lastType === 'bolong' ? 'Masih dalam jam bolong, absen masuk dulu.' :
-            'Tidak bisa ijin bolong setelah absen keluar.',
+              lastType === 'bolong' ? 'Masih dalam jam bolong, absen masuk dulu.' :
+                'Tidak bisa ijin bolong setelah absen keluar.',
           );
           return;
         }
@@ -320,9 +320,8 @@ function EmployeeFlow({ employees }) {
       <div className="h-screen bg-stone-50 flex items-center justify-center p-4">
         <div className="bg-white rounded-3xl shadow-xl max-w-sm w-full p-8 text-center">
           <div
-            className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${
-              done.type === 'bolong' ? 'bg-amber-100' : done.flagged ? 'bg-amber-100' : 'bg-green-100'
-            }`}
+            className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${done.type === 'bolong' ? 'bg-amber-100' : done.flagged ? 'bg-amber-100' : 'bg-green-100'
+              }`}
           >
             {done.type === 'bolong' ? (
               <Coffee className="w-9 h-9 text-amber-600" />
@@ -334,8 +333,8 @@ function EmployeeFlow({ employees }) {
           </div>
           <h2 className="text-xl font-bold text-stone-800 mb-1">
             {done.type === 'masuk' ? 'Absen Masuk Tercatat' :
-             done.type === 'bolong' ? 'Jam Bolong Tercatat' :
-             'Absen Pulang Tercatat'}
+              done.type === 'bolong' ? 'Jam Bolong Tercatat' :
+                'Absen Pulang Tercatat'}
           </h2>
           <p className="text-stone-500 text-sm font-mono mb-1">{formatTime(done.time)} WIB</p>
           {done.flagged && (
@@ -371,13 +370,13 @@ function EmployeeFlow({ employees }) {
     <div className="min-h-screen bg-stone-50 flex items-center justify-center p-4">
       <div className="max-w-sm w-full">
         <div className="bg-stone-900 rounded-t-3xl p-5">
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center justify-center gap-2 mb-1">
             <Flame className="w-5 h-5 text-orange-500" />
             <span className="font-bold text-lg text-white">
               Mamam <span className="text-orange-500">Ayam</span>
             </span>
           </div>
-          <p className="text-stone-400 text-sm">Absen Pegawai Mamam Ayam</p>
+          <p className="text-stone-400 text-sm text-center">Absen Pegawai Mamam Ayam</p>
         </div>
 
         <div className="relative h-0">
@@ -392,17 +391,15 @@ function EmployeeFlow({ employees }) {
             <div className="flex bg-stone-100 rounded-xl p-1 mb-5">
               <button
                 onClick={() => setAbsenType('bolong')}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
-                  absenType === 'bolong' ? 'bg-white shadow text-amber-700' : 'text-stone-500'
-                }`}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${absenType === 'bolong' ? 'bg-white shadow text-amber-700' : 'text-stone-500'
+                  }`}
               >
                 <Coffee className="w-4 h-4" /> Jam Bolong
               </button>
               <button
                 onClick={() => setAbsenType('keluar')}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
-                  absenType === 'keluar' ? 'bg-white shadow text-orange-700' : 'text-stone-500'
-                }`}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${absenType === 'keluar' ? 'bg-white shadow text-orange-700' : 'text-stone-500'
+                  }`}
               >
                 <LogOut className="w-4 h-4" /> Pulang
               </button>
@@ -418,28 +415,30 @@ function EmployeeFlow({ employees }) {
           )}
 
           {/* Progress steps */}
-          <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center justify-center mb-6">
             {STEPS.map((s, i) => {
               const Icon = s.icon;
               const active = step === s.id;
               const completed = step > s.id;
               return (
-                <div key={s.id} className="flex items-center flex-1">
+                <Fragment key={s.id}>
+                  {/* Lingkaran Ikon */}
                   <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center transition ${
-                      completed
+                    className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition ${completed
                         ? 'bg-green-500 text-white'
                         : active
-                        ? 'bg-orange-600 text-white'
-                        : 'bg-stone-100 text-stone-400'
-                    }`}
+                          ? 'bg-orange-600 text-white'
+                          : 'bg-stone-100 text-stone-400'
+                      }`}
                   >
                     {completed ? <CheckCircle2 className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
                   </div>
+
+                  {/* Garis Penghubung */}
                   {i < STEPS.length - 1 && (
-                    <div className={`flex-1 h-0.5 mx-1 ${completed ? 'bg-green-500' : 'bg-stone-100'}`} />
+                    <div className={`w-12 h-0.5 mx-2 ${completed ? 'bg-green-500' : 'bg-stone-100'}`} />
                   )}
-                </div>
+                </Fragment>
               );
             })}
           </div>
@@ -468,11 +467,10 @@ function EmployeeFlow({ employees }) {
                   <button
                     key={emp.id}
                     onClick={() => handlePickEmployee(emp)}
-                    className={`w-full text-left px-4 py-3 rounded-xl border text-sm font-medium transition ${
-                      employee?.id === emp.id
+                    className={`w-full text-left px-4 py-3 rounded-xl border text-sm font-medium transition ${employee?.id === emp.id
                         ? 'border-orange-500 bg-orange-50 text-orange-700'
                         : 'border-stone-200 text-stone-700 hover:bg-stone-50'
-                    }`}
+                      }`}
                   >
                     {emp.name}
                   </button>
@@ -547,15 +545,14 @@ function EmployeeFlow({ employees }) {
             <div className="space-y-4">
               <label className="text-sm font-medium text-stone-700 block">Verifikasi Lokasi</label>
               <div
-                className={`rounded-2xl p-5 flex flex-col items-center text-center gap-2 ${
-                  gpsStatus === 'checking' || gpsStatus === 'idle'
+                className={`rounded-2xl p-5 flex flex-col items-center text-center gap-2 ${gpsStatus === 'checking' || gpsStatus === 'idle'
                     ? 'bg-stone-50'
                     : gpsStatus === 'near'
-                    ? 'bg-green-50'
-                    : gpsStatus === 'far'
-                    ? 'bg-amber-50'
-                    : 'bg-red-50'
-                }`}
+                      ? 'bg-green-50'
+                      : gpsStatus === 'far'
+                        ? 'bg-amber-50'
+                        : 'bg-red-50'
+                  }`}
               >
                 {(gpsStatus === 'checking' || gpsStatus === 'idle') && (
                   <>
