@@ -13,7 +13,7 @@ import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } fr
 // Placeholder sekarang masih koordinat Kemang, Jakarta Selatan (cuma contoh).
 const OUTLET_LAT = Number(import.meta.env.VITE_OUTLET_LAT) || -6.2607;
 const OUTLET_LNG = Number(import.meta.env.VITE_OUTLET_LNG) || 106.8133;
-const OUTLET_RADIUS_M = Number(import.meta.env.VITE_OUTLET_RADIUS_M) || 100;
+const OUTLET_RADIUS_M = Number(import.meta.env.VITE_OUTLET_RADIUS_M) || 50;
 
 const PHOTO_BUCKET = 'attendance-photos';
 
@@ -187,10 +187,14 @@ function EmployeeFlow({ employees }) {
   const canNext = {
     1: !!employee && !checkingStatus && !sudahLengkapHariIni,
     2: !!photoFile,
-    3: gpsStatus === 'near' || gpsStatus === 'far',
+    3: gpsStatus === 'near',
   };
 
   const handleSubmit = async () => {
+    if (gpsStatus !== 'near') {
+      setSubmitError(`Lokasi terlalu jauh. Kamu harus dalam radius ${OUTLET_RADIUS_M}m dari outlet untuk bisa absen.`);
+      return;
+    }
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -549,9 +553,7 @@ function EmployeeFlow({ employees }) {
                     ? 'bg-stone-50'
                     : gpsStatus === 'near'
                       ? 'bg-green-50'
-                      : gpsStatus === 'far'
-                        ? 'bg-amber-50'
-                        : 'bg-red-50'
+                      : 'bg-red-50'
                   }`}
               >
                 {(gpsStatus === 'checking' || gpsStatus === 'idle') && (
@@ -571,11 +573,14 @@ function EmployeeFlow({ employees }) {
                 )}
                 {gpsStatus === 'far' && (
                   <>
-                    <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
-                      <AlertTriangle className="w-6 h-6 text-amber-600" />
+                    <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                      <AlertTriangle className="w-6 h-6 text-red-600" />
                     </div>
-                    <span className="text-sm font-mono font-medium text-amber-700">{distance}m dari outlet</span>
-                    <span className="text-xs text-amber-600">terlalu jauh dari titik outlet</span>
+                    <span className="text-sm font-mono font-medium text-red-700">{distance}m dari outlet</span>
+                    <span className="text-xs text-red-600">terlalu jauh, tidak bisa absen</span>
+                    <button onClick={checkGps} className="text-xs text-orange-600 font-bold underline mt-1">
+                      Cek ulang lokasi
+                    </button>
                   </>
                 )}
                 {gpsStatus === 'denied' && (
@@ -591,7 +596,7 @@ function EmployeeFlow({ employees }) {
                 )}
               </div>
               <p className="text-xs text-stone-400 text-center">
-                Absen tetap tersimpan walau lokasi jauh — hanya ditandai untuk ditinjau admin.
+                Kamu harus berada dalam radius {OUTLET_RADIUS_M}m dari outlet untuk bisa absen.
               </p>
             </div>
           )}
