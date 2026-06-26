@@ -121,6 +121,7 @@ function EmployeeFlow({ employees }) {
 
   const handlePickEmployee = async (emp) => {
     setEmployee(emp);
+    setSearch(''); // tutup list setelah pilih nama
     setSubmitError('');
     setCheckingStatus(true);
     setTodayStatus(null);
@@ -462,23 +463,36 @@ function EmployeeFlow({ employees }) {
               </div>
 
               <div className="space-y-1.5 max-h-52 overflow-y-auto">
-                {filteredEmployees.length === 0 && (
-                  <p className="text-xs text-stone-400 text-center py-4">
-                    {employees.length === 0 ? 'Belum ada data karyawan.' : 'Nama tidak ditemukan.'}
-                  </p>
+                {search.trim() === '' ? (
+                  employee && (
+                    <button
+                      key={employee.id}
+                      className="w-full text-left px-4 py-3 rounded-xl border border-orange-500 bg-orange-50 text-orange-700 text-sm font-medium"
+                    >
+                      {employee.name}
+                    </button>
+                  )
+                ) : (
+                  <>
+                    {filteredEmployees.length === 0 && (
+                      <p className="text-xs text-stone-400 text-center py-4">
+                        {employees.length === 0 ? 'Belum ada data karyawan.' : 'Nama tidak ditemukan.'}
+                      </p>
+                    )}
+                    {filteredEmployees.map((emp) => (
+                      <button
+                        key={emp.id}
+                        onClick={() => handlePickEmployee(emp)}
+                        className={`w-full text-left px-4 py-3 rounded-xl border text-sm font-medium transition ${employee?.id === emp.id
+                            ? 'border-orange-500 bg-orange-50 text-orange-700'
+                            : 'border-stone-200 text-stone-700 hover:bg-stone-50'
+                          }`}
+                      >
+                        {emp.name}
+                      </button>
+                    ))}
+                  </>
                 )}
-                {filteredEmployees.map((emp) => (
-                  <button
-                    key={emp.id}
-                    onClick={() => handlePickEmployee(emp)}
-                    className={`w-full text-left px-4 py-3 rounded-xl border text-sm font-medium transition ${employee?.id === emp.id
-                        ? 'border-orange-500 bg-orange-50 text-orange-700'
-                        : 'border-stone-200 text-stone-700 hover:bg-stone-50'
-                      }`}
-                  >
-                    {emp.name}
-                  </button>
-                ))}
               </div>
 
               {checkingStatus && (
