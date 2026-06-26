@@ -97,6 +97,7 @@ function EmployeeFlow({ employees }) {
 
   // Step 1 — pilih nama
   const [search, setSearch] = useState('');
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [employee, setEmployee] = useState(null);
   const [todayStatus, setTodayStatus] = useState(null); // { hasMasuk, hasKeluar, lastType }
   const [checkingStatus, setCheckingStatus] = useState(false);
@@ -121,7 +122,8 @@ function EmployeeFlow({ employees }) {
 
   const handlePickEmployee = async (emp) => {
     setEmployee(emp);
-    setSearch(''); // tutup dropdown setelah pilih nama
+    setSearch(emp.name); // tampilkan nama terpilih di input
+    setDropdownOpen(false); // tutup dropdown
     setSubmitError('');
     setCheckingStatus(true);
     setTodayStatus(null);
@@ -309,6 +311,7 @@ function EmployeeFlow({ employees }) {
     setStep(1);
     setEmployee(null);
     setSearch('');
+    setDropdownOpen(false);
     setTodayStatus(null);
     setAbsenType('masuk');
     setPhotoFile(null);
@@ -456,19 +459,38 @@ function EmployeeFlow({ employees }) {
                 <Search className="w-4 h-4 text-stone-300 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   value={search}
-                  onChange={(e) => { setSearch(e.target.value); setEmployee(null); }}
-                  onFocus={(e) => e.target.select()}
-                  placeholder={employee ? employee.name : 'Cari nama...'}
-                  className="w-full pl-9 border border-stone-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSearch(val);
+                    // Reset employee kalau teks berubah dari nama yang sudah dipilih
+                    if (employee && val !== employee.name) {
+                      setEmployee(null);
+                      setTodayStatus(null);
+                      setAbsenType('masuk');
+                    }
+                  }}
+                  onFocus={() => {
+                    // Kalau ada employee terpilih, kosongkan input agar bisa cari ulang
+                    if (employee) setSearch('');
+                    setDropdownOpen(true);
+                  }}
+                  onBlur={() => {
+                    // Tunda sedikit agar onClick pada item dropdown sempat jalan dulu
+                    setTimeout(() => {
+                      setDropdownOpen(false);
+                      // Kembalikan nama terpilih ke input kalau user blur tanpa memilih
+                      if (employee) setSearch(employee.name);
+                      else setSearch('');
+                    }, 150);
+                  }}
+                  placeholder="Cari nama..."
+                  className={`w-full pl-9 border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 transition ${
+                    employee ? 'border-orange-400 text-orange-700' : 'border-stone-200 text-stone-700'
+                  }`}
                 />
-                {employee && search.trim() === '' && (
-                  <span className="absolute left-9 top-1/2 -translate-y-1/2 text-sm text-orange-700 font-medium pointer-events-none">
-                    {employee.name}
-                  </span>
-                )}
 
                 {/* Dropdown */}
-                {search.trim() !== '' && (
+                {dropdownOpen && search.trim() !== '' && (
                   <div className="absolute z-10 left-0 right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg overflow-hidden">
                     <div className="max-h-52 overflow-y-auto">
                       {filteredEmployees.length === 0 ? (
@@ -479,12 +501,13 @@ function EmployeeFlow({ employees }) {
                         filteredEmployees.map((emp) => (
                           <button
                             key={emp.id}
-                            onMouseDown={(e) => e.preventDefault()}
+                            onMouseDown={(e) => e.preventDefault()} // cegah blur sebelum onClick
                             onClick={() => handlePickEmployee(emp)}
-                            className={`w-full text-left px-4 py-3 text-sm font-medium transition border-b border-stone-100 last:border-0 ${employee?.id === emp.id
+                            className={`w-full text-left px-4 py-3 text-sm font-medium transition border-b border-stone-100 last:border-0 ${
+                              employee?.id === emp.id
                                 ? 'bg-orange-50 text-orange-700'
                                 : 'text-stone-700 hover:bg-stone-50'
-                              }`}
+                            }`}
                           >
                             {emp.name}
                           </button>
