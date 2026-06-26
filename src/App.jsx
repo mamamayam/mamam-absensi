@@ -121,7 +121,7 @@ function EmployeeFlow({ employees }) {
 
   const handlePickEmployee = async (emp) => {
     setEmployee(emp);
-    setSearch(''); // tutup list setelah pilih nama
+    setSearch(''); // tutup dropdown setelah pilih nama
     setSubmitError('');
     setCheckingStatus(true);
     setTodayStatus(null);
@@ -456,42 +456,42 @@ function EmployeeFlow({ employees }) {
                 <Search className="w-4 h-4 text-stone-300 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Cari nama..."
+                  onChange={(e) => { setSearch(e.target.value); setEmployee(null); }}
+                  onFocus={(e) => e.target.select()}
+                  placeholder={employee ? employee.name : 'Cari nama...'}
                   className="w-full pl-9 border border-stone-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
                 />
-              </div>
+                {employee && search.trim() === '' && (
+                  <span className="absolute left-9 top-1/2 -translate-y-1/2 text-sm text-orange-700 font-medium pointer-events-none">
+                    {employee.name}
+                  </span>
+                )}
 
-              <div className="space-y-1.5 max-h-52 overflow-y-auto">
-                {search.trim() === '' ? (
-                  employee && (
-                    <button
-                      key={employee.id}
-                      className="w-full text-left px-4 py-3 rounded-xl border border-orange-500 bg-orange-50 text-orange-700 text-sm font-medium"
-                    >
-                      {employee.name}
-                    </button>
-                  )
-                ) : (
-                  <>
-                    {filteredEmployees.length === 0 && (
-                      <p className="text-xs text-stone-400 text-center py-4">
-                        {employees.length === 0 ? 'Belum ada data karyawan.' : 'Nama tidak ditemukan.'}
-                      </p>
-                    )}
-                    {filteredEmployees.map((emp) => (
-                      <button
-                        key={emp.id}
-                        onClick={() => handlePickEmployee(emp)}
-                        className={`w-full text-left px-4 py-3 rounded-xl border text-sm font-medium transition ${employee?.id === emp.id
-                            ? 'border-orange-500 bg-orange-50 text-orange-700'
-                            : 'border-stone-200 text-stone-700 hover:bg-stone-50'
-                          }`}
-                      >
-                        {emp.name}
-                      </button>
-                    ))}
-                  </>
+                {/* Dropdown */}
+                {search.trim() !== '' && (
+                  <div className="absolute z-10 left-0 right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg overflow-hidden">
+                    <div className="max-h-52 overflow-y-auto">
+                      {filteredEmployees.length === 0 ? (
+                        <p className="text-xs text-stone-400 text-center py-4">
+                          {employees.length === 0 ? 'Belum ada data karyawan.' : 'Nama tidak ditemukan.'}
+                        </p>
+                      ) : (
+                        filteredEmployees.map((emp) => (
+                          <button
+                            key={emp.id}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => handlePickEmployee(emp)}
+                            className={`w-full text-left px-4 py-3 text-sm font-medium transition border-b border-stone-100 last:border-0 ${employee?.id === emp.id
+                                ? 'bg-orange-50 text-orange-700'
+                                : 'text-stone-700 hover:bg-stone-50'
+                              }`}
+                          >
+                            {emp.name}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
 
