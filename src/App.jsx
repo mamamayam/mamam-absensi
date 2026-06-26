@@ -222,7 +222,7 @@ function EmployeeFlow({ employees }) {
         return;
       }
       if (absenType === 'masuk' && lastType === 'keluar') {
-        setSubmitError('Kamu sudah selesai shift hari ini.');
+        setSubmitError('Kamu sudah selesai kerja hari ini.');
         return;
       }
       if (absenType === 'bolong') {
@@ -413,7 +413,7 @@ function EmployeeFlow({ employees }) {
             <div className="flex items-center gap-2.5 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-3 mb-5">
               <Coffee className="w-4 h-4 text-amber-600 shrink-0" />
               <p className="text-xs text-amber-700 font-medium leading-relaxed">
-                Kamu sedang dalam <span className="font-bold">jam bolong</span>. Absen masuk lagi untuk melanjutkan shift.
+                Kamu sedang dalam <span className="font-bold">jam bolong</span>. Absen masuk lagi untuk melanjutkan kerja.
               </p>
             </div>
           )}
