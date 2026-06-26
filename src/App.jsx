@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import {
   User, Camera, MapPin, CheckCircle2, AlertTriangle,
   ChevronLeft, ChevronRight, Loader2, RotateCcw, Flame,
-  LogOut, ShieldCheck, Search, Coffee,
+  LogOut, ShieldCheck, Coffee,
 } from 'lucide-react';
 import { supabase, isConfigured } from './supabase.js';
 import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } from './utils.js';
@@ -96,8 +96,6 @@ function EmployeeFlow({ employees }) {
   const [absenType, setAbsenType] = useState('masuk');
 
   // Step 1 — pilih nama
-  const [search, setSearch] = useState('');
-  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [employee, setEmployee] = useState(null);
   const [todayStatus, setTodayStatus] = useState(null); // { hasMasuk, hasKeluar, lastType }
   const [checkingStatus, setCheckingStatus] = useState(false);
@@ -115,15 +113,9 @@ function EmployeeFlow({ employees }) {
   const [submitError, setSubmitError] = useState('');
   const [done, setDone] = useState(null); // { type, time, flagged }
 
-  // --- Step 1: cari & pilih nama ---
-  const filteredEmployees = employees.filter((e) =>
-    e.name?.toLowerCase().includes(search.trim().toLowerCase())
-  );
-
+  // --- Step 1: pilih nama ---
   const handlePickEmployee = async (emp) => {
     setEmployee(emp);
-    setSearch(emp.name); // tampilkan nama terpilih di input
-    setDropdownOpen(false); // tutup dropdown
     setSubmitError('');
     setCheckingStatus(true);
     setTodayStatus(null);
@@ -310,8 +302,6 @@ function EmployeeFlow({ employees }) {
   const reset = () => {
     setStep(1);
     setEmployee(null);
-    setSearch('');
-    setDropdownOpen(false);
     setTodayStatus(null);
     setAbsenType('masuk');
     setPhotoFile(null);
@@ -455,68 +445,26 @@ function EmployeeFlow({ employees }) {
           {step === 1 && (
             <div className="space-y-3">
               <label className="text-sm font-medium text-stone-700 block">Pilih Nama Kamu</label>
-              <div className="relative">
-                <Search className="w-4 h-4 text-stone-300 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  value={search}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setSearch(val);
-                    // Reset employee kalau teks berubah dari nama yang sudah dipilih
-                    if (employee && val !== employee.name) {
-                      setEmployee(null);
-                      setTodayStatus(null);
-                      setAbsenType('masuk');
-                    }
-                  }}
-                  onFocus={() => {
-                    // Kalau ada employee terpilih, kosongkan input agar bisa cari ulang
-                    if (employee) setSearch('');
-                    setDropdownOpen(true);
-                  }}
-                  onBlur={() => {
-                    // Tunda sedikit agar onClick pada item dropdown sempat jalan dulu
-                    setTimeout(() => {
-                      setDropdownOpen(false);
-                      // Kembalikan nama terpilih ke input kalau user blur tanpa memilih
-                      if (employee) setSearch(employee.name);
-                      else setSearch('');
-                    }, 150);
-                  }}
-                  placeholder="Cari nama..."
-                  className={`w-full pl-9 border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 transition ${
-                    employee ? 'border-orange-400 text-orange-700' : 'border-stone-200 text-stone-700'
-                  }`}
-                />
-
-                {/* Dropdown */}
-                {dropdownOpen && search.trim() !== '' && (
-                  <div className="absolute z-10 left-0 right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg overflow-hidden">
-                    <div className="max-h-52 overflow-y-auto">
-                      {filteredEmployees.length === 0 ? (
-                        <p className="text-xs text-stone-400 text-center py-4">
-                          {employees.length === 0 ? 'Belum ada data karyawan.' : 'Nama tidak ditemukan.'}
-                        </p>
-                      ) : (
-                        filteredEmployees.map((emp) => (
-                          <button
-                            key={emp.id}
-                            onMouseDown={(e) => e.preventDefault()} // cegah blur sebelum onClick
-                            onClick={() => handlePickEmployee(emp)}
-                            className={`w-full text-left px-4 py-3 text-sm font-medium transition border-b border-stone-100 last:border-0 ${
-                              employee?.id === emp.id
-                                ? 'bg-orange-50 text-orange-700'
-                                : 'text-stone-700 hover:bg-stone-50'
-                            }`}
-                          >
-                            {emp.name}
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
+              
+              <select
+                value={employee?.id || ""}
+                onChange={(e) => {
+                  const selectedEmp = employees.find((emp) => emp.id === e.target.value);
+                  if (selectedEmp) {
+                    handlePickEmployee(selectedEmp);
+                  }
+                }}
+                className="w-full border border-stone-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 bg-white"
+              >
+                <option value="" disabled>
+                  -- Pilih Nama --
+                </option>
+                {employees.map((emp) => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.name}
+                  </option>
+                ))}
+              </select>
 
               {checkingStatus && (
                 <div className="flex items-center gap-1.5 text-xs text-stone-400">
