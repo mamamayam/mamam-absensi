@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react';
 import {
   ClipboardList, ChevronDown, ChevronUp, Plus, Trash2, Pencil,
   CheckCircle2, Circle, Share2, X, AlertTriangle, ListPlus, Check,
-  GripVertical, ArrowUp, ArrowDown,
+  GripVertical, ArrowUp, ArrowDown, Loader2, WifiOff,
 } from 'lucide-react';
+import { supabase } from './supabase.js';
 import {
-  loadMaster, addCategory, renameCategory, deleteCategory,
+  loadMasterCached, loadMasterFromServer, saveMasterToServer, subscribeStockMaster,
+  addCategory, renameCategory, deleteCategory,
   addItem, updateItem, deleteItem, allItemsFlat, seedDefaultStock,
   getActiveChecklist, setItemValue, isChecklistComplete,
   submitChecklist, markShared, cleanupOldSharedChecklists,
@@ -23,7 +25,12 @@ function isStockAdmin(name) {
 
 // ── Kartu ringkas + expand: dipakai di layar utama sebelum absen ────────────
 export default function StockChecklistCard({ onGateStatusChange, currentEmployeeName }) {
-  const [master, setMaster] = useState(() => loadMaster());
+  // Master kategori/item: mulai dari cache lokal (instan, biar gak nge-blank),
+  // lalu di-refresh dari Supabase begitu datang. Sinkron ke device lain lewat
+  // realtime subscription di bawah.
+  const [master, setMaster] = useState(() => loadMasterCached());
+  const [masterLoading, setMasterLoading] = useState(true);
+  const [masterSyncError, setMasterSyncError] = useState('');
   const [checklist, setChecklist] = useState(() => getActiveChecklist());
   const [open, setOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
@@ -34,6 +41,39 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
   useEffect(() => {
     cleanupOldSharedChecklists();
+  }, []);
+
+  // Ambil master terbaru dari Supabase saat komponen mount, lalu subscribe
+  // supaya perubahan dari device lain (misal admin edit di laptop) otomatis
+  // masuk ke sini tanpa perlu reload.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const serverMaster = await loadMasterFromServer(supabase);
+        if (cancelled) return;
+        setMasterSyncError('');
+        setMaster(serverMaster);
+      } catch (err) {
+        if (cancelled) return;
+        // Gagal konek — tetap pakai cache lokal yang sudah ke-load duluan,
+        // cuma kasih tau user datanya mungkin belum yang terbaru.
+        setMasterSyncError('Gagal sinkron data terbaru, menampilkan data tersimpan di device ini.');
+      } finally {
+        if (!cancelled) setMasterLoading(false);
+      }
+    })();
+
+    const unsubscribe = subscribeStockMaster(supabase, (remoteMaster) => {
+      setMaster(remoteMaster);
+      setMasterSyncError('');
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   // Karyawan biasa gak boleh buka panel kelola — kalau somehow kebuka lalu
@@ -59,7 +99,18 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     }
   }, [master.categories, selectedCategoryId]);
 
-  const refreshMaster = (next) => setMaster(next);
+  // Optimistic update: UI langsung berubah pakai `next`, baru kemudian
+  // disimpan ke Supabase di background. Kalau gagal simpan, kasih tau user
+  // lewat masterSyncError (datanya tetap ada di layar, cuma belum ke-sync).
+  const refreshMaster = async (next) => {
+    setMaster(next);
+    try {
+      await saveMasterToServer(supabase, next);
+      setMasterSyncError('');
+    } catch (err) {
+      setMasterSyncError('Gagal menyimpan perubahan ke server. Cek koneksi lalu coba lagi.');
+    }
+  };
   const refreshChecklist = (next) => setChecklist(next);
 
   const handleSetValue = (itemId, patch) => {
@@ -97,7 +148,9 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
           <div>
             <p className="text-sm font-bold text-stone-800">Stock List Belanja</p>
             <p className="text-xs text-stone-400">
-              {items.length === 0
+              {masterLoading
+                ? 'Memuat data stock...'
+                : items.length === 0
                 ? 'Belum ada item — tap untuk tambah'
                 : alreadyShared
                 ? 'Sudah dibagikan ke grup'
@@ -112,7 +165,13 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
             open ? 'bg-orange-100' : 'bg-stone-100'
           }`}
         >
-          {open ? <ChevronUp className="w-4 h-4 text-orange-600" /> : <ChevronDown className="w-4 h-4 text-stone-500" />}
+          {masterLoading ? (
+            <Loader2 className="w-4 h-4 text-stone-400 animate-spin" />
+          ) : open ? (
+            <ChevronUp className="w-4 h-4 text-orange-600" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-stone-500" />
+          )}
         </div>
       </button>
 
@@ -127,6 +186,13 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
       {open && (
         <div className="border-t border-stone-100 px-5 pt-4 pb-5 space-y-4">
+          {masterSyncError && (
+            <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3.5 py-2.5">
+              <WifiOff className="w-4 h-4 text-red-500 shrink-0" />
+              <p className="text-xs text-red-600 font-medium leading-relaxed">{masterSyncError}</p>
+            </div>
+          )}
+
           {items.length === 0 && !manageOpen && (
             <div className="text-center py-4">
               <p className="text-xs text-stone-400 mb-3">Belum ada kategori/item stock. Tambahkan dulu.</p>

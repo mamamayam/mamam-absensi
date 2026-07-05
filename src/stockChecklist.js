@@ -1,8 +1,17 @@
-// ── Stock Checklist — semua disimpan di localStorage, TIDAK ke database ──────
+// ── Stock Checklist ────────────────────────────────────────────────────────
 //
 // Struktur data:
-//  - "stockMaster_v1"        → { categories: [{ id, name, items: [{ id, name, unit, required }] }] }
+//  - Master kategori & item → disimpan di Supabase, tabel "app_config",
+//    row dengan key = 'stockMaster', kolom value (JSONB) = { categories: [...] }.
+//    Ini SINKRON ke semua device (laptop admin, HP kasir, dll) dan otomatis
+//    ter-update di device lain lewat Supabase Realtime (lihat subscribeStockMaster).
+//    localStorage ("stockMaster_v1") dipakai HANYA sebagai cache lokal untuk
+//    tampilan awal secepatnya sebelum data dari server datang, dan sebagai
+//    fallback kalau device sedang offline / gagal konek.
 //  - "stockChecklist_<key>"  → { key, dateStr, values: { [itemId]: { qty, skipped } }, submittedAt, sharedAt }
+//    Checklist harian TETAP di localStorage saja (device-specific, tidak perlu
+//    disinkron — ini catatan pengisian stock oleh kasir yang lagi bertugas
+//    hari itu di device itu).
 //
 // "key" biasanya sama dengan dateStr (YYYY-MM-DD) hari checklist itu dibuat,
 // tapi kalau checklist belum dibagikan ke WhatsApp, dia TIDAK dihapus/direset
@@ -13,16 +22,17 @@ import { getTodayStr } from './utils.js';
 
 const MASTER_KEY = 'stockMaster_v1';
 const CHECKLIST_PREFIX = 'stockChecklist_';
+const STOCK_MASTER_CONFIG_KEY = 'stockMaster';
 
 export function generateStockId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   return 'sid-' + Date.now() + '-' + Math.random().toString(16).slice(2);
 }
 
-// ── Master kategori & item ────────────────────────────────────────────────────
+// ── Master kategori & item (Supabase, sinkron semua device) ────────────────
 const DEFAULT_MASTER = { categories: [] };
 
-export function loadMaster() {
+function loadMasterFromCache() {
   try {
     const raw = localStorage.getItem(MASTER_KEY);
     if (!raw) return DEFAULT_MASTER;
@@ -34,16 +44,94 @@ export function loadMaster() {
   }
 }
 
-export function saveMaster(master) {
-  localStorage.setItem(MASTER_KEY, JSON.stringify(master));
+function saveMasterToCache(master) {
+  try {
+    localStorage.setItem(MASTER_KEY, JSON.stringify(master));
+  } catch (_) {
+    // localStorage penuh/disabled — bukan masalah besar, Supabase tetap sumber utama
+  }
 }
+
+// Ambil master dari Supabase. `supabase` adalah client yang sudah diinisialisasi
+// (import dari './supabase.js' di pemanggil), supaya file ini tidak membuat
+// client sendiri / tidak duplikat konfigurasi.
+//
+// Selalu balikin cache localStorage dulu (instan), lalu caller sebaiknya
+// menimpa dengan hasil Supabase begitu datang — lihat StockChecklist.jsx.
+export function loadMasterCached() {
+  return loadMasterFromCache();
+}
+
+export async function loadMasterFromServer(supabase) {
+  const { data, error } = await supabase
+    .from('app_config')
+    .select('value')
+    .eq('key', STOCK_MASTER_CONFIG_KEY)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  const value = data?.value;
+  if (!value || !Array.isArray(value?.categories)) {
+    return DEFAULT_MASTER;
+  }
+  saveMasterToCache(value);
+  return value;
+}
+
+// Simpan master ke Supabase (upsert by key) + update cache lokal.
+// Fire-and-forget di sisi caller (UI sudah optimistic-update duluan lewat
+// setMaster lokal); kalau gagal, dilempar supaya caller bisa kasih tau user.
+export async function saveMasterToServer(supabase, master) {
+  saveMasterToCache(master); // optimistic: cache lokal langsung update
+  const { error } = await supabase
+    .from('app_config')
+    .upsert({ key: STOCK_MASTER_CONFIG_KEY, value: master }, { onConflict: 'key' });
+
+  if (error) {
+    throw error;
+  }
+  return master;
+}
+
+// Subscribe ke perubahan row stockMaster di app_config lewat Supabase Realtime.
+// onRemoteChange(newMaster) dipanggil setiap ada perubahan dari device lain.
+// Balikin fungsi unsubscribe untuk dipanggil di cleanup useEffect.
+export function subscribeStockMaster(supabase, onRemoteChange) {
+  const channel = supabase
+    .channel('stock-master-changes')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'app_config', filter: `key=eq.${STOCK_MASTER_CONFIG_KEY}` },
+      (payload) => {
+        const value = payload.new?.value;
+        if (value && Array.isArray(value.categories)) {
+          saveMasterToCache(value);
+          onRemoteChange(value);
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+// ── Fungsi mutator di bawah ini semuanya PURE (hanya menghitung `next`,
+// TIDAK menyimpan apa-apa). Setelah dapat `next`, caller (StockChecklist.jsx)
+// wajib panggil saveMasterToServer(supabase, next) sendiri untuk benar-benar
+// menyimpannya ke Supabase + cache lokal. Ini supaya file ini tidak perlu tahu
+// soal koneksi Supabase, dan supaya caller bisa kasih feedback loading/error
+// ke user saat proses simpan berlangsung.
 
 export function addCategory(master, name) {
   const next = {
     ...master,
     categories: [...master.categories, { id: generateStockId(), name, items: [] }],
   };
-  saveMaster(next);
   return next;
 }
 
@@ -52,13 +140,11 @@ export function renameCategory(master, categoryId, name) {
     ...master,
     categories: master.categories.map((c) => (c.id === categoryId ? { ...c, name } : c)),
   };
-  saveMaster(next);
   return next;
 }
 
 export function deleteCategory(master, categoryId) {
   const next = { ...master, categories: master.categories.filter((c) => c.id !== categoryId) };
-  saveMaster(next);
   return next;
 }
 
@@ -71,7 +157,6 @@ export function addItem(master, categoryId, { name, unit, required }) {
         : c
     ),
   };
-  saveMaster(next);
   return next;
 }
 
@@ -84,7 +169,6 @@ export function updateItem(master, categoryId, itemId, patch) {
         : c
     ),
   };
-  saveMaster(next);
   return next;
 }
 
@@ -95,7 +179,6 @@ export function deleteItem(master, categoryId, itemId) {
       c.id === categoryId ? { ...c, items: c.items.filter((it) => it.id !== itemId) } : c
     ),
   };
-  saveMaster(next);
   return next;
 }
 
@@ -114,7 +197,6 @@ export function reorderCategory(master, fromIndex, toIndex) {
   const [moved] = cats.splice(fromIndex, 1);
   cats.splice(toIndex, 0, moved);
   const next = { ...master, categories: cats };
-  saveMaster(next);
   return next;
 }
 
@@ -138,7 +220,6 @@ export function reorderItem(master, categoryId, fromIndex, toIndex) {
     ...master,
     categories: master.categories.map((c) => (c.id === categoryId ? { ...c, items } : c)),
   };
-  saveMaster(next);
   return next;
 }
 
@@ -164,7 +245,6 @@ export function moveItemToCategory(master, fromCategoryId, itemId, toCategoryId)
       return c;
     }),
   };
-  saveMaster(next);
   return next;
 }
 
