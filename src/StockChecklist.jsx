@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   ClipboardList, ChevronDown, ChevronUp, Plus, Trash2, Pencil,
   CheckCircle2, Circle, Share2, X, AlertTriangle, ListPlus, Check,
-  GripVertical,
+  GripVertical, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import {
   loadMaster, addCategory, renameCategory, deleteCategory,
@@ -302,11 +302,7 @@ function ManageStockMaster({ master, onChange }) {
   const [itemForms, setItemForms] = useState({}); // { [categoryId]: { name, unit, required } }
   const [editingItem, setEditingItem] = useState(null); // { categoryId, itemId, name, unit }
 
-  // Drag state kategori
-  const [dragCatIndex, setDragCatIndex] = useState(null);
-  const [overCatIndex, setOverCatIndex] = useState(null);
-
-  // Drag state item — disimpan per kategori supaya gak bentrok antar kategori
+  // Item tetap pakai drag reorder
   const [dragItem, setDragItem] = useState(null); // { categoryId, index }
   const [overItem, setOverItem] = useState(null); // { categoryId, index }
 
@@ -365,29 +361,15 @@ function ManageStockMaster({ master, onChange }) {
 
   const cancelEditItem = () => setEditingItem(null);
 
-  // ── Drag reorder kategori ───────────────────────────────────────────────
-  const handleCatDragStart = (index) => (e) => {
-    setDragCatIndex(index);
-    e.dataTransfer.effectAllowed = 'move';
+  // ── Reorder kategori pakai panah naik/turun ─────────────────────────────
+  const moveCategoryUp = (index) => {
+    if (index <= 0) return;
+    onChange(reorderCategory(master, index, index - 1));
   };
 
-  const handleCatDragOver = (index) => (e) => {
-    e.preventDefault();
-    if (index !== overCatIndex) setOverCatIndex(index);
-  };
-
-  const handleCatDrop = (index) => (e) => {
-    e.preventDefault();
-    if (dragCatIndex !== null && dragCatIndex !== index) {
-      onChange(reorderCategory(master, dragCatIndex, index));
-    }
-    setDragCatIndex(null);
-    setOverCatIndex(null);
-  };
-
-  const handleCatDragEnd = () => {
-    setDragCatIndex(null);
-    setOverCatIndex(null);
+  const moveCategoryDown = (index) => {
+    if (index >= master.categories.length - 1) return;
+    onChange(reorderCategory(master, index, index + 1));
   };
 
   // ── Drag reorder item (dalam satu kategori) ─────────────────────────────
@@ -441,20 +423,14 @@ function ManageStockMaster({ master, onChange }) {
       </div>
 
       <p className="text-[10px] text-stone-400 italic px-0.5">
-        Tahan ikon <GripVertical className="w-3 h-3 inline -mt-0.5" /> lalu geser untuk mengubah urutan.
+        Pakai panah <ArrowUp className="w-3 h-3 inline -mt-0.5" />/<ArrowDown className="w-3 h-3 inline -mt-0.5" /> untuk urutkan kategori, atau tahan ikon <GripVertical className="w-3 h-3 inline -mt-0.5" /> untuk urutkan item.
       </p>
 
       <div className="space-y-3 pt-1">
         {master.categories.map((cat, catIndex) => (
           <div
             key={cat.id}
-            onDragOver={handleCatDragOver(catIndex)}
-            onDrop={handleCatDrop(catIndex)}
-            className={`bg-white rounded-xl p-3 border transition-colors ${
-              overCatIndex === catIndex && dragCatIndex !== null && dragCatIndex !== catIndex
-                ? 'border-orange-400 bg-orange-50/40'
-                : 'border-stone-200'
-            } ${dragCatIndex === catIndex ? 'opacity-40' : ''}`}
+            className="bg-white rounded-xl p-3 border border-stone-200"
           >
             <div className="flex items-center justify-between gap-2 mb-2">
               {editingCatId === cat.id ? (
@@ -476,15 +452,30 @@ function ManageStockMaster({ master, onChange }) {
               ) : (
                 <>
                   <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                    <span
-                      draggable
-                      onDragStart={handleCatDragStart(catIndex)}
-                      onDragEnd={handleCatDragEnd}
-                      className="text-stone-300 shrink-0 cursor-grab active:cursor-grabbing touch-none"
-                      title="Geser untuk urutkan kategori"
-                    >
-                      <GripVertical className="w-4 h-4" />
-                    </span>
+                    <div className="flex flex-col shrink-0 -my-1">
+                      <button
+                        onClick={() => moveCategoryUp(catIndex)}
+                        disabled={catIndex === 0}
+                        className={`p-0.5 rounded ${
+                          catIndex === 0 ? 'text-stone-200' : 'text-stone-400 hover:text-orange-600'
+                        }`}
+                        title="Pindah kategori ke atas"
+                      >
+                        <ArrowUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => moveCategoryDown(catIndex)}
+                        disabled={catIndex === master.categories.length - 1}
+                        className={`p-0.5 rounded ${
+                          catIndex === master.categories.length - 1
+                            ? 'text-stone-200'
+                            : 'text-stone-400 hover:text-orange-600'
+                        }`}
+                        title="Pindah kategori ke bawah"
+                      >
+                        <ArrowDown className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                     <span className="text-sm font-bold text-stone-700 truncate">{cat.name}</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
