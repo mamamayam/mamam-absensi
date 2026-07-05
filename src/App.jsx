@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { supabase, isConfigured } from './supabase.js';
 import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } from './utils.js';
+import StockChecklistCard from './StockChecklist.jsx';
 
 // TODO: ganti 3 angka ini dengan koordinat outlet ASLI kamu.
 const OUTLET_LAT = Number(import.meta.env.VITE_OUTLET_LAT) || -6.2607;
@@ -253,6 +254,9 @@ function EmployeeFlow({ employees }) {
   const [submitError, setSubmitError] = useState('');
   const [done, setDone] = useState(null); // { type, time, flagged }
 
+  // Gate "Absen Pulang" — dikunci sampai Stock List checklist selesai diisi.
+  const [stockGate, setStockGate] = useState({ gateOpen: true, hasItems: false, complete: false });
+
   // --- Step 1: pilih nama ---
   const handlePickEmployee = async (emp) => {
     setEmployee(emp);
@@ -281,7 +285,7 @@ function EmployeeFlow({ employees }) {
       } else if (lastType === 'bolong') {
         setAbsenType('masuk_lagi');
       } else if (lastType === 'masuk' || lastType === 'masuk_lagi') {
-        setAbsenType('keluar');
+        setAbsenType(stockGate.gateOpen ? 'keluar' : 'bolong');
       }
     } catch (error) {
       console.error('Gagal memuat status:', error);
@@ -394,6 +398,10 @@ function EmployeeFlow({ employees }) {
         }
         if (hasKeluar) {
           setSubmitError('Kamu sudah absen keluar hari ini.');
+          return;
+        }
+        if (!stockGate.gateOpen) {
+          setSubmitError('Stock List belum selesai diisi. Lengkapi checklist stock dulu sebelum absen pulang.');
           return;
         }
       }
@@ -551,24 +559,36 @@ function EmployeeFlow({ employees }) {
 
           {/* Pilihan tipe absen — dinamis sesuai status karyawan */}
           {(todayStatus?.lastType === 'masuk' || todayStatus?.lastType === 'masuk_lagi') && !sudahLengkapHariIni && (
-            <div className="flex bg-stone-100 rounded-xl p-1 mb-5">
-              <button
-                onClick={() => setAbsenType('bolong')}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
-                  absenType === 'bolong' ? 'bg-white shadow text-amber-700' : 'text-stone-500'
-                }`}
-              >
-                <Coffee className="w-4 h-4" /> Jam Bolong
-              </button>
-              <button
-                onClick={() => setAbsenType('keluar')}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
-                  absenType === 'keluar' ? 'bg-white shadow text-orange-700' : 'text-stone-500'
-                }`}
-              >
-                <LogOut className="w-4 h-4" /> Pulang
-              </button>
-            </div>
+            <>
+              <div className="flex bg-stone-100 rounded-xl p-1 mb-2">
+                <button
+                  onClick={() => setAbsenType('bolong')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
+                    absenType === 'bolong' ? 'bg-white shadow text-amber-700' : 'text-stone-500'
+                  }`}
+                >
+                  <Coffee className="w-4 h-4" /> Jam Bolong
+                </button>
+                <button
+                  onClick={() => stockGate.gateOpen && setAbsenType('keluar')}
+                  disabled={!stockGate.gateOpen}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition ${
+                    !stockGate.gateOpen
+                      ? 'text-stone-300 cursor-not-allowed'
+                      : absenType === 'keluar'
+                      ? 'bg-white shadow text-orange-700'
+                      : 'text-stone-500'
+                  }`}
+                >
+                  <LogOut className="w-4 h-4" /> Pulang
+                </button>
+              </div>
+              {!stockGate.gateOpen && (
+                <p className="text-[11px] text-amber-600 text-center mb-3">
+                  Absen pulang terkunci — isi Stock List di bawah dulu.
+                </p>
+              )}
+            </>
           )}
 
           {todayStatus?.lastType === 'bolong' && !sudahLengkapHariIni && (
@@ -588,6 +608,11 @@ function EmployeeFlow({ employees }) {
                 <CheckCircle2 className="w-5 h-5" /> Absen Masuk Lagi
               </button>
             </div>
+          )}
+
+          {/* Stock List — hanya tampil setelah ada yang absen masuk hari ini */}
+          {todayStatus?.hasMasuk && !sudahLengkapHariIni && (
+            <StockChecklistCard onGateStatusChange={setStockGate} currentEmployeeName={employee?.name} />
           )}
 
           {/* Progress steps */}
