@@ -342,18 +342,38 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
           {canManage && (
             <div className="pt-1 border-t border-stone-100">
               <button
-                onClick={() => setManageOpen((v) => !v)}
+                onClick={() => setManageOpen(true)}
                 className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-stone-500 py-2"
               >
-                <ListPlus className="w-3.5 h-3.5" />
-                {manageOpen ? 'Tutup Pengaturan' : 'Kelola Kategori & Item'}
+                <ListPlus className="w-3.5 h-3.5" /> Kelola Kategori & Item
               </button>
             </div>
           )}
+        </div>
+      )}
 
-          {canManage && manageOpen && (
-            <ManageStockMaster master={master} onChange={refreshMaster} />
-          )}
+      {canManage && manageOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center"
+          onClick={() => setManageOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white w-full sm:max-w-lg sm:rounded-3xl rounded-t-3xl max-h-[85vh] flex flex-col overflow-hidden"
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100 shrink-0">
+              <p className="text-sm font-bold text-stone-800">Kelola Kategori & Item</p>
+              <button
+                onClick={() => setManageOpen(false)}
+                className="w-8 h-8 rounded-full bg-stone-100 flex items-center justify-center text-stone-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="overflow-y-auto px-5 py-4">
+              <ManageStockMaster master={master} onChange={refreshMaster} />
+            </div>
+          </div>
         </div>
       )}
     </div>
