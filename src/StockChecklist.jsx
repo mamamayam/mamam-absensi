@@ -9,8 +9,9 @@ import {
   loadMasterCached, loadMasterFromServer, saveMasterToServer, subscribeStockMaster,
   addCategory, renameCategory, deleteCategory,
   addItem, updateItem, deleteItem, allItemsFlat, seedDefaultStock,
-  getActiveChecklist, setItemValue, isChecklistComplete,
-  submitChecklist, markShared, cleanupOldSharedChecklists,
+  loadChecklistCached, loadActiveChecklistFromServer, subscribeStockChecklist,
+  setItemValue, isChecklistComplete, isChecklistLocked,
+  submitChecklist, markShared,
   formatWhatsAppText, buildWhatsAppShareUrl,
   reorderCategory, reorderItem, moveItemToCategory,
 } from './stockChecklist.js';
@@ -31,17 +32,15 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   const [master, setMaster] = useState(() => loadMasterCached());
   const [masterLoading, setMasterLoading] = useState(true);
   const [masterSyncError, setMasterSyncError] = useState('');
-  const [checklist, setChecklist] = useState(() => getActiveChecklist());
+  const [checklist, setChecklist] = useState(() => loadChecklistCached());
+  const [checklistLoading, setChecklistLoading] = useState(true);
+  const [checklistSyncError, setChecklistSyncError] = useState('');
   const [open, setOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   const [selectedCategoryId, setSelectedCategoryId] = useState('');
   const [justShared, setJustShared] = useState(false);
 
   const canManage = isStockAdmin(currentEmployeeName);
-
-  useEffect(() => {
-    cleanupOldSharedChecklists();
-  }, []);
 
   // Ambil master terbaru dari Supabase saat komponen mount, lalu subscribe
   // supaya perubahan dari device lain (misal admin edit di laptop) otomatis
@@ -76,6 +75,40 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     };
   }, []);
 
+  // Ambil checklist aktif dari Supabase saat mount, lalu subscribe by key
+  // supaya progress isi antar HP sinkron real-time (bagi tugas isi form) dan
+  // lock/share dari satu device langsung kelihatan di device lain.
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe = () => {};
+
+    (async () => {
+      try {
+        const serverChecklist = await loadActiveChecklistFromServer(supabase);
+        if (cancelled) return;
+        setChecklistSyncError('');
+        setChecklist(serverChecklist);
+
+        unsubscribe = subscribeStockChecklist(supabase, serverChecklist.key, (remoteChecklist) => {
+          setChecklist(remoteChecklist);
+          setChecklistSyncError('');
+        });
+      } catch (err) {
+        if (cancelled) return;
+        // Gagal konek — tetap pakai cache lokal, kasih tau user datanya
+        // mungkin belum sinkron dengan device lain.
+        setChecklistSyncError('Gagal sinkron checklist terbaru, menampilkan data tersimpan di device ini.');
+      } finally {
+        if (!cancelled) setChecklistLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
   // Karyawan biasa gak boleh buka panel kelola — kalau somehow kebuka lalu
   // gantian pilih nama yang bukan admin, tutup paksa panelnya.
   useEffect(() => {
@@ -85,8 +118,11 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   const items = allItemsFlat(master);
   const complete = isChecklistComplete(checklist, master);
   const alreadySubmitted = !!checklist.submittedAt;
-  const alreadyShared = !!checklist.sharedAt;
-  const gateOpen = items.length === 0 || alreadySubmitted;
+  const locked = isChecklistLocked(checklist);
+  // Gate absen pulang kebuka kalau belum ada item sama sekali, ATAU checklist
+  // sudah di-lock (artinya SUDAH ADA karyawan yang submit lengkap ke WA —
+  // berlaku untuk semua device, bukan cuma device yang mengirim).
+  const gateOpen = items.length === 0 || locked;
 
   useEffect(() => {
     onGateStatusChange?.({ gateOpen, hasItems: items.length > 0, complete });
@@ -111,22 +147,50 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
       setMasterSyncError('Gagal menyimpan perubahan ke server. Cek koneksi lalu coba lagi.');
     }
   };
-  const refreshChecklist = (next) => setChecklist(next);
-
-  const handleSetValue = (itemId, patch) => {
-    refreshChecklist(setItemValue(checklist, itemId, patch));
+  // Optimistic update sama pola seperti refreshMaster: UI langsung berubah,
+  // baru disimpan ke Supabase di background. Device lain akan menerima
+  // perubahan ini lewat subscribeStockChecklist, jadi tidak perlu di-push manual.
+  const handleSetValue = async (itemId, patch) => {
+    if (locked) return; // sudah terkunci (ada yang submit ke WA) — gak bisa diedit lagi
+    const optimistic = {
+      ...checklist,
+      values: { ...checklist.values, [itemId]: { qty: patch.qty ?? null, skipped: !!patch.skipped } },
+      submittedAt: null,
+    };
+    setChecklist(optimistic);
+    try {
+      await setItemValue(supabase, checklist, itemId, patch);
+      setChecklistSyncError('');
+    } catch (err) {
+      setChecklistSyncError('Gagal menyimpan isian ke server. Cek koneksi lalu coba lagi.');
+    }
   };
 
-  const handleSubmit = () => {
-    if (!complete) return;
-    refreshChecklist(submitChecklist(checklist));
+  const handleSubmit = async () => {
+    if (!complete || locked) return;
+    const optimistic = { ...checklist, submittedAt: new Date().toISOString(), submittedBy: currentEmployeeName || null };
+    setChecklist(optimistic);
+    try {
+      const saved = await submitChecklist(supabase, checklist, currentEmployeeName);
+      setChecklist(saved);
+      setChecklistSyncError('');
+    } catch (err) {
+      setChecklistSyncError('Gagal menyimpan checklist ke server. Cek koneksi lalu coba lagi.');
+    }
   };
 
-  const handleShare = () => {
+  const handleShare = async () => {
+    if (locked) return;
     const text = formatWhatsAppText(checklist, master);
     window.open(buildWhatsAppShareUrl(text), '_blank');
-    refreshChecklist(markShared(checklist));
     setJustShared(true);
+    try {
+      const saved = await markShared(supabase, checklist);
+      setChecklist(saved); // locked=true — otomatis kebuka gate absen di device ini,
+      setChecklistSyncError(''); // dan lewat realtime, di semua device lain juga.
+    } catch (err) {
+      setChecklistSyncError('Gagal mengunci checklist di server. Coba tekan bagikan lagi.');
+    }
   };
 
   const selectedCategory = master.categories.find((c) => c.id === selectedCategoryId);
@@ -148,14 +212,16 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
           <div>
             <p className="text-sm font-bold text-stone-800">Stock List Belanja</p>
             <p className="text-xs text-stone-400">
-              {masterLoading
+              {masterLoading || checklistLoading
                 ? 'Memuat data stock...'
                 : items.length === 0
                 ? 'Belum ada item — tap untuk tambah'
-                : alreadyShared
-                ? 'Sudah dibagikan ke grup'
+                : locked
+                ? checklist.submittedBy
+                  ? `Sudah diisi ${checklist.submittedBy} & dibagikan, absen pulang terbuka`
+                  : 'Sudah dibagikan ke grup, absen pulang terbuka'
                 : alreadySubmitted
-                ? 'Sudah diisi, absen pulang terbuka'
+                ? 'Sudah diisi, tinggal bagikan ke WhatsApp'
                 : `Wajib diisi sebelum absen pulang · ${items.length} item`}
             </p>
           </div>
@@ -193,6 +259,13 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
             </div>
           )}
 
+          {checklistSyncError && (
+            <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3.5 py-2.5">
+              <WifiOff className="w-4 h-4 text-red-500 shrink-0" />
+              <p className="text-xs text-red-600 font-medium leading-relaxed">{checklistSyncError}</p>
+            </div>
+          )}
+
           {items.length === 0 && !manageOpen && (
             <div className="text-center py-4">
               <p className="text-xs text-stone-400 mb-3">Belum ada kategori/item stock. Tambahkan dulu.</p>
@@ -217,7 +290,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
             </div>
           )}
 
-          {items.length > 0 && !alreadyShared && (
+          {items.length > 0 && !locked && (
             <>
               {/* Dropdown kategori */}
               <div className="space-y-1.5">
@@ -243,7 +316,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                   )}
                   {selectedCategory.items.map((it) => {
                     const v = checklist.values[it.id];
-                    const filled = v && (v.skipped || (v.qty !== null && v.qty !== ''));
+                    const filled = v && v.qty !== null && v.qty !== '';
                     return (
                       <div
                         key={it.id}
@@ -275,29 +348,13 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                             min="0"
                             placeholder="Jumlah stock"
                             value={v?.qty ?? ''}
-                            disabled={v?.skipped}
                             onChange={(e) =>
                               handleSetValue(it.id, { qty: e.target.value, skipped: false })
                             }
-                            className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:bg-stone-100 disabled:text-stone-400"
+                            className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
                           />
                           <span className="text-xs text-stone-400 w-14 shrink-0">{it.unit || '-'}</span>
                         </div>
-                        {!it.required && (
-                          <button
-                            onClick={() =>
-                              handleSetValue(it.id, {
-                                qty: v?.skipped ? '' : null,
-                                skipped: !v?.skipped,
-                              })
-                            }
-                            className={`mt-2 text-[11px] font-bold px-2.5 py-1 rounded-lg ${
-                              v?.skipped ? 'bg-stone-700 text-white' : 'bg-stone-100 text-stone-500'
-                            }`}
-                          >
-                            {v?.skipped ? '✓ Dilewati — tap batal' : 'Isi Nanti'}
-                          </button>
-                        )}
                       </div>
                     );
                   })}
@@ -329,12 +386,18 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
             </>
           )}
 
-          {alreadyShared && (
+          {locked && (
             <div className="text-center py-2">
               <CheckCircle2 className="w-8 h-8 text-green-500 mx-auto mb-2" />
-              <p className="text-sm font-medium text-stone-700">Checklist sudah dibagikan</p>
+              <p className="text-sm font-medium text-stone-700">
+                Checklist sudah dibagikan{checklist.submittedBy ? ` oleh ${checklist.submittedBy}` : ''}
+              </p>
               <p className="text-xs text-stone-400 mt-0.5">
-                {justShared ? 'Berhasil dibuka di WhatsApp.' : `Terkirim ${new Date(checklist.sharedAt).toLocaleString('id-ID')}`}
+                {justShared
+                  ? 'Berhasil dibuka di WhatsApp.'
+                  : checklist.sharedAt
+                  ? `Terkirim ${new Date(checklist.sharedAt).toLocaleString('id-ID')}`
+                  : 'Form ini sudah dikunci, absen pulang terbuka.'}
               </p>
             </div>
           )}
