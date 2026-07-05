@@ -8,21 +8,32 @@
 //    localStorage ("stockMaster_v1") dipakai HANYA sebagai cache lokal untuk
 //    tampilan awal secepatnya sebelum data dari server datang, dan sebagai
 //    fallback kalau device sedang offline / gagal konek.
-//  - "stockChecklist_<key>"  → { key, dateStr, values: { [itemId]: { qty, skipped } }, submittedAt, sharedAt }
-//    Checklist harian TETAP di localStorage saja (device-specific, tidak perlu
-//    disinkron — ini catatan pengisian stock oleh kasir yang lagi bertugas
-//    hari itu di device itu).
+//  - Checklist harian → disimpan di Supabase, tabel "stock_checklists",
+//    row per key (biasanya = tanggal). Kolom: values (JSONB, { [itemId]:
+//    { qty, skipped } }), submitted_at, submitted_by, shared_at, locked.
+//    SINKRON real-time antar device (lihat subscribeStockChecklist) supaya
+//    karyawan bisa bagi tugas isi form checklist di HP masing-masing —
+//    begitu satu HP isi satu item, HP lain langsung lihat progressnya.
+//    localStorage ("stockChecklist_<key>") dipakai HANYA sebagai cache lokal,
+//    sama polanya seperti stockMaster.
 //
 // "key" biasanya sama dengan dateStr (YYYY-MM-DD) hari checklist itu dibuat,
 // tapi kalau checklist belum dibagikan ke WhatsApp, dia TIDAK dihapus/direset
 // walau sudah ganti hari — checklist lama itu yang tetap jadi checklist aktif
 // sampai ada yang menekan "Bagikan ke WhatsApp".
+//
+// Locking: begitu SATU karyawan menekan "Bagikan ke WhatsApp" dan berhasil
+// tersimpan sebagai locked=true di server, checklist itu terkunci untuk
+// SEMUA device (lihat isChecklistLocked). Device lain yang masih membuka
+// form yang sama akan otomatis melihatnya sebagai "sudah dibagikan" lewat
+// realtime subscribe, dan gate absen pulang ikut kebuka di semua device.
 
 import { getTodayStr } from './utils.js';
 
 const MASTER_KEY = 'stockMaster_v1';
 const CHECKLIST_PREFIX = 'stockChecklist_';
 const STOCK_MASTER_CONFIG_KEY = 'stockMaster';
+const CHECKLIST_TABLE = 'stock_checklists';
 
 export function generateStockId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -304,16 +315,50 @@ export function seedDefaultStock() {
   return master;
 }
 
-// ── Checklist harian ──────────────────────────────────────────────────────────
+// ── Checklist harian (Supabase, sinkron semua device) ──────────────────────
 function checklistStorageKey(key) {
   return CHECKLIST_PREFIX + key;
 }
 
 function emptyChecklist(key, dateStr) {
-  return { key, dateStr, values: {}, submittedAt: null, sharedAt: null };
+  return {
+    key,
+    dateStr,
+    values: {},
+    submittedAt: null,
+    submittedBy: null,
+    sharedAt: null,
+    locked: false,
+  };
 }
 
-function loadChecklistByKey(key) {
+// Konversi row Supabase (snake_case) <-> bentuk lokal (camelCase) yang dipakai UI.
+function rowToChecklist(row) {
+  return {
+    key: row.key,
+    dateStr: row.date_str,
+    values: row.values || {},
+    submittedAt: row.submitted_at,
+    submittedBy: row.submitted_by ?? null,
+    sharedAt: row.shared_at,
+    locked: !!row.locked,
+  };
+}
+
+function checklistToRow(checklist) {
+  return {
+    key: checklist.key,
+    date_str: checklist.dateStr,
+    values: checklist.values,
+    submitted_at: checklist.submittedAt,
+    submitted_by: checklist.submittedBy ?? null,
+    shared_at: checklist.sharedAt,
+    locked: !!checklist.locked,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function loadChecklistCacheByKey(key) {
   try {
     const raw = localStorage.getItem(checklistStorageKey(key));
     if (!raw) return null;
@@ -323,23 +368,26 @@ function loadChecklistByKey(key) {
   }
 }
 
-function saveChecklist(checklist) {
-  localStorage.setItem(checklistStorageKey(checklist.key), JSON.stringify(checklist));
+function saveChecklistCache(checklist) {
+  try {
+    localStorage.setItem(checklistStorageKey(checklist.key), JSON.stringify(checklist));
+  } catch (_) {
+    // localStorage penuh/disabled — bukan masalah besar, Supabase tetap sumber utama
+  }
 }
 
-// Cari semua checklist tersimpan yang submitted tapi BELUM dibagikan — itu
-// artinya masih "nyangkut" dari hari sebelumnya dan harus tetap jadi checklist
-// aktif sampai dibagikan, biar gak keburu ke-reset otomatis pas ganti hari.
-function findPendingUnsharedChecklist() {
+// Cari cache lokal checklist yang submitted tapi belum locked/shared — dipakai
+// sebagai fallback instan sebelum data server datang (lihat loadChecklistCached).
+function findPendingUnsharedChecklistCache() {
   let found = null;
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
     if (!k || !k.startsWith(CHECKLIST_PREFIX)) continue;
     try {
       const parsed = JSON.parse(localStorage.getItem(k));
-      if (parsed?.submittedAt && !parsed?.sharedAt) {
+      if (parsed?.submittedAt && !parsed?.locked) {
         if (!found || new Date(parsed.submittedAt) < new Date(found.submittedAt)) {
-          found = parsed; // ambil yang paling lama nyangkut
+          found = parsed;
         }
       }
     } catch (_) {
@@ -349,40 +397,112 @@ function findPendingUnsharedChecklist() {
   return found;
 }
 
-// Checklist aktif untuk saat ini:
-// 1. Kalau ada checklist lama yang submitted tapi belum dibagikan → itu yang aktif
-//    (harus dibagikan dulu sebelum bisa mulai checklist baru), walau sudah ganti hari.
-// 2. Kalau tidak ada → pakai/buat checklist "hari ini" yang masih terbuka (belum shared).
-//    Kalau checklist "hari ini" sudah pernah dibagikan (siklus closed), buat checklist
-//    baru dengan key unik supaya tidak menimpa arsip yang sudah dibagikan.
-export function getActiveChecklist() {
-  const pending = findPendingUnsharedChecklist();
+// Cache lokal instan (dipakai sebagai initial state sebelum Supabase datang),
+// sama pola seperti loadMasterCached().
+export function loadChecklistCached() {
+  const pending = findPendingUnsharedChecklistCache();
   if (pending) return pending;
-
   const todayStr = getTodayStr();
-  const existing = loadChecklistByKey(todayStr);
-  if (existing && !existing.sharedAt) return existing;
-
-  return emptyChecklist(existing ? `${todayStr}-${generateStockId().slice(0, 8)}` : todayStr, todayStr);
+  const existing = loadChecklistCacheByKey(todayStr);
+  if (existing && !existing.locked) return existing;
+  return emptyChecklist(todayStr, todayStr);
 }
 
-export function setItemValue(checklist, itemId, { qty, skipped }) {
+// Ambil checklist aktif dari Supabase:
+// 1. Kalau ada row submitted tapi belum locked → itu yang aktif (harus dibagikan
+//    dulu / ke-lock dulu sebelum bisa mulai checklist baru), walau sudah ganti hari.
+// 2. Kalau tidak ada → pakai/buat row "hari ini" yang masih terbuka (belum locked).
+//    Kalau row "hari ini" sudah locked (siklus closed), buat checklist baru dengan
+//    key unik supaya tidak menimpa arsip yang sudah dibagikan.
+export async function loadActiveChecklistFromServer(supabase) {
+  const { data: pendingRows, error: pendingErr } = await supabase
+    .from(CHECKLIST_TABLE)
+    .select('*')
+    .not('submitted_at', 'is', null)
+    .eq('locked', false)
+    .order('submitted_at', { ascending: true })
+    .limit(1);
+
+  if (pendingErr) throw pendingErr;
+
+  if (pendingRows && pendingRows.length > 0) {
+    const checklist = rowToChecklist(pendingRows[0]);
+    saveChecklistCache(checklist);
+    return checklist;
+  }
+
+  const todayStr = getTodayStr();
+  const { data: todayRow, error: todayErr } = await supabase
+    .from(CHECKLIST_TABLE)
+    .select('*')
+    .eq('key', todayStr)
+    .maybeSingle();
+
+  if (todayErr) throw todayErr;
+
+  if (todayRow && !todayRow.locked) {
+    const checklist = rowToChecklist(todayRow);
+    saveChecklistCache(checklist);
+    return checklist;
+  }
+
+  // Belum ada row hari ini, atau row hari ini sudah locked → checklist baru.
+  const key = todayRow ? `${todayStr}-${generateStockId().slice(0, 8)}` : todayStr;
+  const fresh = emptyChecklist(key, todayStr);
+  saveChecklistCache(fresh);
+  return fresh;
+}
+
+// Subscribe ke perubahan tabel stock_checklists lewat Supabase Realtime, supaya
+// begitu satu HP isi satu item, HP lain yang buka checklist yang sama (key sama)
+// langsung lihat progressnya tanpa reload. Balikin fungsi unsubscribe.
+export function subscribeStockChecklist(supabase, activeKey, onRemoteChange) {
+  const channel = supabase
+    .channel(`stock-checklist-${activeKey}`)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: CHECKLIST_TABLE, filter: `key=eq.${activeKey}` },
+      (payload) => {
+        if (!payload.new) return;
+        const checklist = rowToChecklist(payload.new);
+        saveChecklistCache(checklist);
+        onRemoteChange(checklist);
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+// Simpan checklist ke Supabase (upsert by key) + update cache lokal, lalu balikin
+// hasilnya. Optimistic di sisi caller: UI sudah dipakai duluan lewat state lokal.
+async function saveChecklistToServer(supabase, checklist) {
+  saveChecklistCache(checklist);
+  const { error } = await supabase
+    .from(CHECKLIST_TABLE)
+    .upsert(checklistToRow(checklist), { onConflict: 'key' });
+  if (error) throw error;
+  return checklist;
+}
+
+export async function setItemValue(supabase, checklist, itemId, { qty, skipped }) {
   const next = {
     ...checklist,
     values: { ...checklist.values, [itemId]: { qty: qty ?? null, skipped: !!skipped } },
     // begitu diedit lagi, submittedAt dicabut supaya gate nyala lagi kalau ada perubahan
+    // (kalau sudah locked, ini tidak akan terpanggil — lihat gate di StockChecklist.jsx)
     submittedAt: null,
   };
-  saveChecklist(next);
-  return next;
+  return saveChecklistToServer(supabase, next);
 }
 
 export function isChecklistComplete(checklist, master) {
   const items = allItemsFlat(master);
   if (items.length === 0) return true; // belum ada master item = tidak nge-gate apa-apa
-  // Cuma item WAJIB yang nge-gate submit. Item opsional bebas — mau diisi,
-  // di-"Isi Nanti", atau gak disentuh sama sekali, gak mempengaruhi status
-  // complete.
+  // Cuma item WAJIB yang nge-gate submit. Item opsional bebas — mau diisi atau
+  // gak disentuh sama sekali, gak mempengaruhi status complete.
   return items.every((it) => {
     if (!it.required) return true;
     const v = checklist.values[it.id];
@@ -391,45 +511,45 @@ export function isChecklistComplete(checklist, master) {
   });
 }
 
-export function submitChecklist(checklist) {
-  const next = { ...checklist, submittedAt: new Date().toISOString() };
-  saveChecklist(next);
-  return next;
+// Checklist dianggap terkunci (gak bisa diedit lagi di device manapun) begitu
+// ada device yang berhasil membagikannya ke WhatsApp — lihat markShared.
+export function isChecklistLocked(checklist) {
+  return !!checklist.locked;
 }
 
-export function markShared(checklist) {
-  const next = { ...checklist, sharedAt: new Date().toISOString() };
-  saveChecklist(next);
-  return next;
+export async function submitChecklist(supabase, checklist, submittedBy) {
+  const next = {
+    ...checklist,
+    submittedAt: new Date().toISOString(),
+    submittedBy: submittedBy || null,
+  };
+  return saveChecklistToServer(supabase, next);
 }
 
-// NOTE: dulu fungsi ini menghapus checklist lama yang sudah dibagikan + beda
-// tanggal dari localStorage. Sekarang TIDAK — histori checklist per tanggal
-// dibiarkan tetap ada selamanya sebagai arsip. Yang "kosong" saat ganti hari
-// hanyalah checklist AKTIF baru (lihat getActiveChecklist), bukan menghapus
-// data checklist tanggal-tanggal sebelumnya.
-// Fungsi ini tetap ada (no-op) supaya pemanggilnya tidak perlu diubah.
-export function cleanupOldSharedChecklists() {
-  // sengaja tidak melakukan apa-apa — histori checklist tidak dihapus.
+// Dipanggil saat satu karyawan menekan "Bagikan ke WhatsApp". Ini yang bikin
+// checklist locked=true untuk SEMUA device — device lain yang masih buka form
+// yang sama akan otomatis ke-update lewat subscribeStockChecklist dan melihat
+// gate absen pulang ikut kebuka.
+export async function markShared(supabase, checklist) {
+  const next = { ...checklist, sharedAt: new Date().toISOString(), locked: true };
+  return saveChecklistToServer(supabase, next);
 }
 
-// Ambil semua histori checklist yang pernah dibuat, urut dari terbaru,
-// untuk keperluan menampilkan log/riwayat kalau suatu saat dibutuhkan.
-export function listChecklistHistory() {
-  const out = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (!k || !k.startsWith(CHECKLIST_PREFIX)) continue;
-    try {
-      out.push(JSON.parse(localStorage.getItem(k)));
-    } catch (_) {
-      // abaikan entry rusak
-    }
-  }
-  return out.sort((a, b) => new Date(b.dateStr) - new Date(a.dateStr));
+// Ambil semua histori checklist yang pernah dibuat dari Supabase, urut dari
+// terbaru, untuk keperluan menampilkan log/riwayat kalau suatu saat dibutuhkan.
+export async function listChecklistHistory(supabase) {
+  const { data, error } = await supabase
+    .from(CHECKLIST_TABLE)
+    .select('*')
+    .order('date_str', { ascending: false });
+  if (error) throw error;
+  return (data || []).map(rowToChecklist);
 }
 
 // Format teks untuk dibagikan ke WhatsApp — grup per kategori, nama - jumlah - satuan.
+// Item yang belum diisi (qty kosong/null, dan bukan skipped-dengan-nilai) TIDAK
+// ikut dikirim, supaya pesan WA cuma berisi item yang benar-benar ada isinya
+// dan gampang dibaca.
 export function formatWhatsAppText(checklist, master) {
   const dateStr = checklist.dateStr;
   const [y, m, d] = dateStr.split('-');
@@ -437,15 +557,16 @@ export function formatWhatsAppText(checklist, master) {
 
   for (const cat of master.categories) {
     if (cat.items.length === 0) continue;
-    lines.push(`*${cat.name}*`);
-    for (const it of cat.items) {
+    const filledItems = cat.items.filter((it) => {
       const v = checklist.values[it.id];
-      if (v?.skipped) {
-        lines.push(`- ${it.name}: (belum diisi)`);
-      } else {
-        const qty = v?.qty ?? '-';
-        lines.push(`- ${it.name}: ${qty} ${it.unit || ''}`.trim());
-      }
+      return v && v.qty !== null && v.qty !== '' && !v.skipped;
+    });
+    if (filledItems.length === 0) continue; // kategori tanpa item terisi dilewati semua
+
+    lines.push(`*${cat.name}*`);
+    for (const it of filledItems) {
+      const v = checklist.values[it.id];
+      lines.push(`- ${it.name}: ${v.qty} ${it.unit || ''}`.trim());
     }
     lines.push('');
   }
