@@ -306,7 +306,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
               {!complete && (
                 <p className="text-[11px] text-amber-600 text-center">
-                  Lengkapi semua item wajib (dan pilih "Isi Nanti" untuk yang opsional) untuk lanjut.
+                  Lengkapi semua item wajib untuk lanjut. Item opsional boleh dilewati.
                 </p>
               )}
 

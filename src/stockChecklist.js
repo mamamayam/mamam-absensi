@@ -380,11 +380,14 @@ export function setItemValue(checklist, itemId, { qty, skipped }) {
 export function isChecklistComplete(checklist, master) {
   const items = allItemsFlat(master);
   if (items.length === 0) return true; // belum ada master item = tidak nge-gate apa-apa
+  // Cuma item WAJIB yang nge-gate submit. Item opsional bebas — mau diisi,
+  // di-"Isi Nanti", atau gak disentuh sama sekali, gak mempengaruhi status
+  // complete.
   return items.every((it) => {
+    if (!it.required) return true;
     const v = checklist.values[it.id];
     if (!v) return false;
-    if (it.required) return v.qty !== null && v.qty !== '' && !Number.isNaN(Number(v.qty));
-    return v.skipped || (v.qty !== null && v.qty !== '' && !Number.isNaN(Number(v.qty)));
+    return v.qty !== null && v.qty !== '' && !Number.isNaN(Number(v.qty));
   });
 }
 
