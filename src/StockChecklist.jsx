@@ -41,6 +41,9 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   const [justShared, setJustShared] = useState(false);
 
   const canManage = isStockAdmin(currentEmployeeName);
+  // Agung Prayoga juga boleh langsung "Selesai Isi Checklist" & bagikan ke WA
+  // walau item wajib belum lengkap semua (bypass khusus dia saja).
+  const canBypassChecklist = isStockAdmin(currentEmployeeName);
 
   // Ambil master terbaru dari Supabase saat komponen mount, lalu subscribe
   // supaya perubahan dari device lain (misal admin edit di laptop) otomatis
@@ -159,7 +162,12 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     };
     setChecklist(optimistic);
     try {
-      await setItemValue(supabase, checklist, itemId, patch);
+      // setItemValue sekarang merge atomic di server (lihat stockChecklist.js) dan
+      // balikin state gabungan sebenarnya dari server — pakai itu, JANGAN state
+      // optimistic lokal, supaya kalau device lain juga baru saja isi item lain,
+      // isian device lain itu tidak ketiban/hilang di layar device ini.
+      const merged = await setItemValue(supabase, checklist, itemId, patch);
+      setChecklist(merged);
       setChecklistSyncError('');
     } catch (err) {
       setChecklistSyncError('Gagal menyimpan isian ke server. Cek koneksi lalu coba lagi.');
@@ -167,7 +175,9 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   };
 
   const handleSubmit = async () => {
-    if (!complete || locked) return;
+    // Agung Prayoga boleh bypass kelengkapan checklist (misal buru-buru / item
+    // fisiknya belum sempat dicek semua) — selain dia, tetap wajib complete dulu.
+    if ((!complete && !canBypassChecklist) || locked) return;
     const optimistic = { ...checklist, submittedAt: new Date().toISOString(), submittedBy: currentEmployeeName || null };
     setChecklist(optimistic);
     try {
@@ -361,16 +371,22 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                 </div>
               )}
 
-              {!complete && (
+              {!complete && !canBypassChecklist && (
                 <p className="text-[11px] text-amber-600 text-center">
                   Lengkapi semua item wajib untuk lanjut. Item opsional boleh dilewati.
+                </p>
+              )}
+
+              {!complete && canBypassChecklist && (
+                <p className="text-[11px] text-orange-600 text-center font-medium">
+                  Item wajib belum lengkap, tapi kamu bisa lanjutkan (khusus Agung Prayoga).
                 </p>
               )}
 
               {!alreadySubmitted ? (
                 <button
                   onClick={handleSubmit}
-                  disabled={!complete}
+                  disabled={!complete && !canBypassChecklist}
                   className="w-full bg-orange-600 disabled:bg-stone-200 disabled:text-stone-400 text-white font-bold py-3 rounded-xl transition"
                 >
                   Selesai Isi Checklist
