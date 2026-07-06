@@ -476,26 +476,45 @@ export function subscribeStockChecklist(supabase, activeKey, onRemoteChange) {
   };
 }
 
-// Simpan checklist ke Supabase (upsert by key) + update cache lokal, lalu balikin
-// hasilnya. Optimistic di sisi caller: UI sudah dipakai duluan lewat state lokal.
-async function saveChecklistToServer(supabase, checklist) {
-  saveChecklistCache(checklist);
-  const { error } = await supabase
-    .from(CHECKLIST_TABLE)
-    .upsert(checklistToRow(checklist), { onConflict: 'key' });
-  if (error) throw error;
-  return checklist;
-}
+// CATATAN: dulu ada fungsi saveChecklistToServer() di sini yang upsert SELURUH
+// row (termasuk kolom `values`) dari snapshot state lokal caller. Itu sumber
+// race condition: kalau device lain baru saja menambah isian yang belum sempat
+// di-refresh ke state lokal device ini, upsert seluruh row akan MENIMPA isian
+// device lain itu jadi hilang. Sudah dihapus — semua mutasi checklist sekarang
+// WAJIB lewat RPC (merge_stock_checklist_value / submit_stock_checklist /
+// share_stock_checklist di bawah) yang cuma meng-update kolom spesifik yang
+// relevan di server, bukan replace seluruh row dari state lokal yang mungkin basi.
 
+// Simpan SATU nilai item secara atomic lewat RPC merge_stock_checklist_value
+// (lihat supabase_schema_stock_checklist_atomic_merge.sql), supaya kalau ada
+// 2 device isi item BERBEDA hampir bersamaan, isian keduanya tetap ke-merge
+// dan tidak saling menimpa (dulu: upsert seluruh kolom `values` dari snapshot
+// lokal device, jadi device yang menyimpan belakangan bisa "menghapus" isian
+// device lain yang belum sempat ke-refresh state lokalnya).
 export async function setItemValue(supabase, checklist, itemId, { qty, skipped }) {
-  const next = {
+  // Optimistic cache lokal duluan biar UI kerasa instan (server jadi sumber kebenaran).
+  const optimisticCache = {
     ...checklist,
     values: { ...checklist.values, [itemId]: { qty: qty ?? null, skipped: !!skipped } },
-    // begitu diedit lagi, submittedAt dicabut supaya gate nyala lagi kalau ada perubahan
-    // (kalau sudah locked, ini tidak akan terpanggil — lihat gate di StockChecklist.jsx)
     submittedAt: null,
   };
-  return saveChecklistToServer(supabase, next);
+  saveChecklistCache(optimisticCache);
+
+  const { data, error } = await supabase.rpc('merge_stock_checklist_value', {
+    p_key: checklist.key,
+    p_date_str: checklist.dateStr,
+    p_item_id: itemId,
+    p_qty: qty === null || qty === undefined ? null : String(qty),
+    p_skipped: !!skipped,
+  });
+  if (error) throw error;
+
+  const row = Array.isArray(data) ? data[0] : data;
+  // Kalau row null (misal checklist sudah locked duluan di server, jadi RPC
+  // sengaja tidak update apa-apa), pakai checklist yang ada saja.
+  const merged = row ? rowToChecklist(row) : checklist;
+  saveChecklistCache(merged);
+  return merged;
 }
 
 export function isChecklistComplete(checklist, master) {
@@ -517,22 +536,36 @@ export function isChecklistLocked(checklist) {
   return !!checklist.locked;
 }
 
+// Pakai RPC submit_stock_checklist supaya cuma kolom submitted_at/submitted_by
+// yang berubah — TIDAK menimpa `values` kalau device lain baru saja menambah
+// isian yang belum sempat di-refresh state lokal device ini (race condition
+// yang sebelumnya bisa bikin isian device lain hilang saat device ini submit).
 export async function submitChecklist(supabase, checklist, submittedBy) {
-  const next = {
-    ...checklist,
-    submittedAt: new Date().toISOString(),
-    submittedBy: submittedBy || null,
-  };
-  return saveChecklistToServer(supabase, next);
+  const { data, error } = await supabase.rpc('submit_stock_checklist', {
+    p_key: checklist.key,
+    p_submitted_by: submittedBy || null,
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  const merged = row ? rowToChecklist(row) : checklist;
+  saveChecklistCache(merged);
+  return merged;
 }
 
 // Dipanggil saat satu karyawan menekan "Bagikan ke WhatsApp". Ini yang bikin
 // checklist locked=true untuk SEMUA device — device lain yang masih buka form
 // yang sama akan otomatis ke-update lewat subscribeStockChecklist dan melihat
-// gate absen pulang ikut kebuka.
+// gate absen pulang ikut kebuka. Pakai RPC share_stock_checklist supaya
+// `values` tidak ikut ditimpa (sama alasan seperti submitChecklist di atas).
 export async function markShared(supabase, checklist) {
-  const next = { ...checklist, sharedAt: new Date().toISOString(), locked: true };
-  return saveChecklistToServer(supabase, next);
+  const { data, error } = await supabase.rpc('share_stock_checklist', {
+    p_key: checklist.key,
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  const merged = row ? rowToChecklist(row) : checklist;
+  saveChecklistCache(merged);
+  return merged;
 }
 
 // Ambil semua histori checklist yang pernah dibuat dari Supabase, urut dari
