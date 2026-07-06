@@ -404,7 +404,7 @@ export function loadChecklistCached() {
   if (pending) return pending;
   const todayStr = getTodayStr();
   const existing = loadChecklistCacheByKey(todayStr);
-  if (existing && !existing.locked) return existing;
+  if (existing) return existing;
   return emptyChecklist(todayStr, todayStr);
 }
 
