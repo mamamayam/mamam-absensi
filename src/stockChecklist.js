@@ -10,12 +10,21 @@
 //    fallback kalau device sedang offline / gagal konek.
 //  - Checklist harian → disimpan di Supabase, tabel "stock_checklists",
 //    row per key (biasanya = tanggal). Kolom: values (JSONB, { [itemId]:
-//    { qty, skipped } }), submitted_at, submitted_by, shared_at, locked.
+//    { qty, skipped } }), category_done (JSONB, { [categoryId]: true }),
+//    submitted_at, submitted_by, shared_at, locked.
 //    SINKRON real-time antar device (lihat subscribeStockChecklist) supaya
-//    karyawan bisa bagi tugas isi form checklist di HP masing-masing —
-//    begitu satu HP isi satu item, HP lain langsung lihat progressnya.
+//    karyawan bisa bagi tugas isi form checklist di HP masing-masing.
 //    localStorage ("stockChecklist_<key>") dipakai HANYA sebagai cache lokal,
 //    sama polanya seperti stockMaster.
+//
+// Granularitas push: BUKAN per-keystroke/per-item lagi (dulu begitu, bikin
+// glitch pas ngetik angka panjang karena tiap karakter push ke server).
+// Sekarang push dilakukan PER KATEGORI: karyawan isi semua item dalam satu
+// kategori di form lokal (state React biasa, belum ke server), baru pas
+// tekan "Selesai" kategori itu, SEMUA item dalam kategori itu di-push
+// sekaligus lewat satu RPC atomic (completeCategory) + kategori itu ditandai
+// done=true. Device lain langsung lihat kategori itu berubah jadi selesai
+// lewat realtime, tanpa perlu tau isian detailnya real-time per-karakter.
 //
 // "key" biasanya sama dengan dateStr (YYYY-MM-DD) hari checklist itu dibuat,
 // tapi kalau checklist belum dibagikan ke WhatsApp, dia TIDAK dihapus/direset
@@ -27,6 +36,9 @@
 // SEMUA device (lihat isChecklistLocked). Device lain yang masih membuka
 // form yang sama akan otomatis melihatnya sebagai "sudah dibagikan" lewat
 // realtime subscribe, dan gate absen pulang ikut kebuka di semua device.
+// Form checklist TETAP tertutup (locked) sampai ganti hari, walau layar
+// di-refresh berkali-kali — lihat loadActiveChecklistFromServer &
+// findPendingUnsharedChecklistCache.
 
 import { getTodayStr } from './utils.js';
 
@@ -325,6 +337,7 @@ function emptyChecklist(key, dateStr) {
     key,
     dateStr,
     values: {},
+    categoryDone: {},
     submittedAt: null,
     submittedBy: null,
     sharedAt: null,
@@ -338,6 +351,7 @@ function rowToChecklist(row) {
     key: row.key,
     dateStr: row.date_str,
     values: row.values || {},
+    categoryDone: row.category_done || {},
     submittedAt: row.submitted_at,
     submittedBy: row.submitted_by ?? null,
     sharedAt: row.shared_at,
@@ -350,6 +364,7 @@ function checklistToRow(checklist) {
     key: checklist.key,
     date_str: checklist.dateStr,
     values: checklist.values,
+    category_done: checklist.categoryDone || {},
     submitted_at: checklist.submittedAt,
     submitted_by: checklist.submittedBy ?? null,
     shared_at: checklist.sharedAt,
@@ -481,31 +496,32 @@ export function subscribeStockChecklist(supabase, activeKey, onRemoteChange) {
 // race condition: kalau device lain baru saja menambah isian yang belum sempat
 // di-refresh ke state lokal device ini, upsert seluruh row akan MENIMPA isian
 // device lain itu jadi hilang. Sudah dihapus — semua mutasi checklist sekarang
-// WAJIB lewat RPC (merge_stock_checklist_value / submit_stock_checklist /
-// share_stock_checklist di bawah) yang cuma meng-update kolom spesifik yang
-// relevan di server, bukan replace seluruh row dari state lokal yang mungkin basi.
+// WAJIB lewat RPC (complete_stock_checklist_category / reopen_stock_checklist_category /
+// submit_stock_checklist / share_stock_checklist di bawah) yang cuma meng-update
+// kolom spesifik yang relevan di server, bukan replace seluruh row dari state
+// lokal yang mungkin basi.
 
-// Simpan SATU nilai item secara atomic lewat RPC merge_stock_checklist_value
-// (lihat supabase_schema_stock_checklist_atomic_merge.sql), supaya kalau ada
-// 2 device isi item BERBEDA hampir bersamaan, isian keduanya tetap ke-merge
-// dan tidak saling menimpa (dulu: upsert seluruh kolom `values` dari snapshot
-// lokal device, jadi device yang menyimpan belakangan bisa "menghapus" isian
-// device lain yang belum sempat ke-refresh state lokalnya).
-export async function setItemValue(supabase, checklist, itemId, { qty, skipped }) {
+// Tandai SATU kategori sebagai "selesai diisi", push semua isian item dalam
+// kategori itu SEKALIGUS (satu RPC atomic completeCategory), bukan per-item
+// per-keystroke seperti dulu. `values` di sini cuma isian item-item dalam
+// kategori ini (bukan seluruh checklist), supaya kalau device lain baru saja
+// menyelesaikan kategori LAIN, isian device lain itu tidak ketiban/hilang —
+// RPC di server men-jsonb_set/merge cuma key item milik kategori ini.
+export async function completeCategory(supabase, checklist, categoryId, values) {
   // Optimistic cache lokal duluan biar UI kerasa instan (server jadi sumber kebenaran).
   const optimisticCache = {
     ...checklist,
-    values: { ...checklist.values, [itemId]: { qty: qty ?? null, skipped: !!skipped } },
+    values: { ...checklist.values, ...values },
+    categoryDone: { ...checklist.categoryDone, [categoryId]: true },
     submittedAt: null,
   };
   saveChecklistCache(optimisticCache);
 
-  const { data, error } = await supabase.rpc('merge_stock_checklist_value', {
+  const { data, error } = await supabase.rpc('complete_stock_checklist_category', {
     p_key: checklist.key,
     p_date_str: checklist.dateStr,
-    p_item_id: itemId,
-    p_qty: qty === null || qty === undefined ? null : String(qty),
-    p_skipped: !!skipped,
+    p_category_id: categoryId,
+    p_values: values, // object { [itemId]: { qty, skipped } } — hanya item kategori ini
   });
   if (error) throw error;
 
@@ -517,17 +533,65 @@ export async function setItemValue(supabase, checklist, itemId, { qty, skipped }
   return merged;
 }
 
-export function isChecklistComplete(checklist, master) {
-  const items = allItemsFlat(master);
-  if (items.length === 0) return true; // belum ada master item = tidak nge-gate apa-apa
-  // Cuma item WAJIB yang nge-gate submit. Item opsional bebas — mau diisi atau
-  // gak disentuh sama sekali, gak mempengaruhi status complete.
-  return items.every((it) => {
+// Buka lagi kategori yang sudah ditandai selesai (sebelum checklist keseluruhan
+// di-share ke WA), supaya bisa diedit ulang. Cuma mengubah categoryDone,
+// TIDAK menghapus isian `values` yang sudah ada (biar gak perlu isi ulang dari 0).
+export async function reopenCategory(supabase, checklist, categoryId) {
+  const optimisticCache = {
+    ...checklist,
+    categoryDone: { ...checklist.categoryDone, [categoryId]: false },
+  };
+  saveChecklistCache(optimisticCache);
+
+  const { data, error } = await supabase.rpc('reopen_stock_checklist_category', {
+    p_key: checklist.key,
+    p_category_id: categoryId,
+  });
+  if (error) throw error;
+
+  const row = Array.isArray(data) ? data[0] : data;
+  const merged = row ? rowToChecklist(row) : checklist;
+  saveChecklistCache(merged);
+  return merged;
+}
+
+// Sebuah kategori dianggap "punya gate wajib" kalau minimal 1 item di
+// dalamnya required=true. Kategori isi-opsional-semua tidak menge-gate apa pun.
+function categoryHasRequiredItems(category) {
+  return category.items.some((it) => it.required);
+}
+
+// Kategori dianggap lengkap (siap ditandai "Selesai") kalau SEMUA item wajib
+// di dalamnya sudah terisi qty yang valid. Item opsional bebas kosong.
+export function isCategoryFilledComplete(category, checklist) {
+  return category.items.every((it) => {
     if (!it.required) return true;
     const v = checklist.values[it.id];
     if (!v) return false;
     return v.qty !== null && v.qty !== '' && !Number.isNaN(Number(v.qty));
   });
+}
+
+// Progress ringkas kategori: berapa item wajib yang sudah terisi dari total
+// item wajib di kategori itu — dipakai untuk badge "3/5" di UI.
+export function categoryRequiredProgress(category, checklist) {
+  const required = category.items.filter((it) => it.required);
+  const filled = required.filter((it) => {
+    const v = checklist.values[it.id];
+    return v && v.qty !== null && v.qty !== '' && !Number.isNaN(Number(v.qty));
+  });
+  return { filled: filled.length, total: required.length };
+}
+
+// Checklist keseluruhan dianggap complete kalau SEMUA kategori yang punya
+// item wajib sudah ditandai done=true. Kategori tanpa item wajib sama sekali
+// tidak nge-gate (boleh gak disentuh/gak ditandai selesai).
+export function isChecklistComplete(checklist, master) {
+  const items = allItemsFlat(master);
+  if (items.length === 0) return true; // belum ada master item = tidak nge-gate apa-apa
+  const gatingCategories = master.categories.filter(categoryHasRequiredItems);
+  if (gatingCategories.length === 0) return true; // tidak ada kategori dengan item wajib
+  return gatingCategories.every((c) => !!checklist.categoryDone?.[c.id]);
 }
 
 // Checklist dianggap terkunci (gak bisa diedit lagi di device manapun) begitu
