@@ -56,11 +56,13 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
   // Ambil master terbaru dari Supabase saat komponen mount, lalu subscribe
   // supaya perubahan dari device lain (misal admin edit di laptop) otomatis
-  // masuk ke sini tanpa perlu reload.
+  // masuk ke sini tanpa perlu reload. onResync di subscribeStockMaster bikin
+  // effect ini juga re-fetch tiap kali channel realtime (re)connect, jaga-jaga
+  // ada perubahan yang kelewat selama koneksi sempat putus.
   useEffect(() => {
     let cancelled = false;
 
-    (async () => {
+    const refetchMaster = async () => {
       try {
         const serverMaster = await loadMasterFromServer(supabase);
         if (cancelled) return;
@@ -71,15 +73,25 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
         // Gagal konek — tetap pakai cache lokal yang sudah ke-load duluan,
         // cuma kasih tau user datanya mungkin belum yang terbaru.
         setMasterSyncError('Gagal sinkron data terbaru, menampilkan data tersimpan di device ini.');
-      } finally {
-        if (!cancelled) setMasterLoading(false);
       }
+    };
+
+    (async () => {
+      await refetchMaster();
+      if (!cancelled) setMasterLoading(false);
     })();
 
-    const unsubscribe = subscribeStockMaster(supabase, (remoteMaster) => {
-      setMaster(remoteMaster);
-      setMasterSyncError('');
-    });
+    const unsubscribe = subscribeStockMaster(
+      supabase,
+      (remoteMaster) => {
+        if (cancelled) return;
+        setMaster(remoteMaster);
+        setMasterSyncError('');
+      },
+      () => {
+        if (!cancelled) refetchMaster();
+      }
+    );
 
     return () => {
       cancelled = true;
@@ -87,12 +99,11 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     };
   }, []);
 
-  // Ambil checklist aktif dari Supabase saat mount, lalu subscribe by key
-  // supaya progress isi antar HP sinkron real-time (bagi tugas isi form) dan
-  // lock/share dari satu device langsung kelihatan di device lain.
+  // Effect A: ambil checklist aktif dari server SEKALI saat mount. State
+  // `checklist` di-set dari sini (atau dari cache lokal duluan sebagai initial
+  // state, lihat useState di atas).
   useEffect(() => {
     let cancelled = false;
-    let unsubscribe = () => {};
 
     (async () => {
       try {
@@ -100,11 +111,6 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
         if (cancelled) return;
         setChecklistSyncError('');
         setChecklist(serverChecklist);
-
-        unsubscribe = subscribeStockChecklist(supabase, serverChecklist.key, (remoteChecklist) => {
-          setChecklist(remoteChecklist);
-          setChecklistSyncError('');
-        });
       } catch (err) {
         if (cancelled) return;
         // Gagal konek — tetap pakai cache lokal, kasih tau user datanya
@@ -117,9 +123,55 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
     return () => {
       cancelled = true;
-      unsubscribe();
     };
   }, []);
+
+  // Effect B: subscribe realtime ke key checklist yang SEDANG aktif (bukan
+  // cuma sekali pas mount) — effect ini sengaja depend ke `checklist.key`,
+  // supaya kalau key aktif berubah selama komponen masih terbuka (misal
+  // checklist di-share lalu device ini lanjut ke checklist baru tanpa reload
+  // halaman), koneksi realtime otomatis pindah mendengarkan key yang baru,
+  // bukan nyangkut dengerin key lama yang sudah tidak relevan.
+  //
+  // onResync dipanggil setiap channel (re)connect (termasuk tiap kali sesudah
+  // koneksi realtime sempat putus-nyambung) — re-fetch dari server supaya
+  // tidak ada perubahan device lain yang KELEWAT selama jendela disconnect.
+  // Kalau ternyata ada checklist aktif yang berbeda, setChecklist di sini akan
+  // mengubah checklist.key, yang otomatis men-trigger effect ini lagi untuk
+  // pindah subscribe ke key yang benar — self-correcting.
+  useEffect(() => {
+    if (!checklist.key) return;
+    let cancelled = false;
+
+    const unsubscribe = subscribeStockChecklist(
+      supabase,
+      checklist.key,
+      (remoteChecklist) => {
+        if (cancelled) return;
+        setChecklist(remoteChecklist);
+        setChecklistSyncError('');
+      },
+      () => {
+        if (cancelled) return;
+        loadActiveChecklistFromServer(supabase)
+          .then((fresh) => {
+            if (cancelled) return;
+            setChecklist(fresh);
+            setChecklistSyncError('');
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setChecklistSyncError('Gagal sinkron ulang checklist. Cek koneksi.');
+            }
+          });
+      }
+    );
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [checklist.key]);
 
   // Karyawan biasa gak boleh buka panel kelola — kalau somehow kebuka lalu
   // gantian pilih nama yang bukan admin, tutup paksa panelnya.
