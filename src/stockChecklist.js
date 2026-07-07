@@ -38,7 +38,7 @@
 // realtime subscribe, dan gate absen pulang ikut kebuka di semua device.
 // Form checklist TETAP tertutup (locked) sampai ganti hari, walau layar
 // di-refresh berkali-kali — lihat loadActiveChecklistFromServer &
-// findPendingUnsharedChecklistCache.
+// findActiveUnlockedChecklistCache.
 
 import { getTodayStr } from './utils.js';
 
@@ -121,8 +121,14 @@ export async function saveMasterToServer(supabase, master) {
 
 // Subscribe ke perubahan row stockMaster di app_config lewat Supabase Realtime.
 // onRemoteChange(newMaster) dipanggil setiap ada perubahan dari device lain.
+// onResync (opsional) dipanggil setiap channel berhasil (re)connect — termasuk
+// SETIAP KALI setelah koneksi realtime sempat putus-nyambung (misal wifi
+// goyang) — supaya device bisa re-fetch dari server dan tidak kehilangan
+// perubahan yang terjadi PERSIS selama jendela waktu terputus (postgres_changes
+// cuma mengirim event yang terjadi SAAT channel aktif, tidak ada replay
+// otomatis untuk backlog kejadian saat disconnect).
 // Balikin fungsi unsubscribe untuk dipanggil di cleanup useEffect.
-export function subscribeStockMaster(supabase, onRemoteChange) {
+export function subscribeStockMaster(supabase, onRemoteChange, onResync) {
   const channel = supabase
     .channel('stock-master-changes')
     .on(
@@ -136,7 +142,11 @@ export function subscribeStockMaster(supabase, onRemoteChange) {
         }
       }
     )
-    .subscribe();
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED' && typeof onResync === 'function') {
+        onResync();
+      }
+    });
 
   return () => {
     supabase.removeChannel(channel);
@@ -356,7 +366,7 @@ function emptyChecklist(key, dateStr) {
 // server tapi device lain masih lihat belum selesai". Fungsi ini selalu
 // memastikan hasil akhirnya adalah OBJECT, entah dari object langsung atau
 // dari string yang perlu di-JSON.parse dulu.
-function parseJsonbField(value, fallback) {
+export function parseJsonbField(value, fallback) {
   if (value === null || value === undefined) return fallback;
   if (typeof value === 'string') {
     try {
@@ -368,7 +378,7 @@ function parseJsonbField(value, fallback) {
   return value;
 }
 
-function rowToChecklist(row) {
+export function rowToChecklist(row) {
   return {
     key: row.key,
     dateStr: row.date_str,
@@ -378,20 +388,6 @@ function rowToChecklist(row) {
     submittedBy: row.submitted_by ?? null,
     sharedAt: row.shared_at,
     locked: !!row.locked,
-  };
-}
-
-function checklistToRow(checklist) {
-  return {
-    key: checklist.key,
-    date_str: checklist.dateStr,
-    values: checklist.values,
-    category_done: checklist.categoryDone || {},
-    submitted_at: checklist.submittedAt,
-    submitted_by: checklist.submittedBy ?? null,
-    shared_at: checklist.sharedAt,
-    locked: !!checklist.locked,
-    updated_at: new Date().toISOString(),
   };
 }
 
@@ -413,17 +409,21 @@ function saveChecklistCache(checklist) {
   }
 }
 
-// Cari cache lokal checklist yang submitted tapi belum locked/shared — dipakai
-// sebagai fallback instan sebelum data server datang (lihat loadChecklistCached).
-function findPendingUnsharedChecklistCache() {
+// Cari cache lokal checklist yang UNLOCKED (belum di-share ke WA) — dipakai
+// untuk carry-over instan kalau belum ada cache khusus untuk hari ini (misal
+// checklist kemarin belum sempat dibagikan, dan device ini baru dibuka lagi
+// hari ini SEBELUM data server sempat datang). Kalau ada beberapa entry
+// unlocked (seharusnya jarang terjadi), ambil yang dateStr paling lama —
+// itu yang paling mungkin jadi checklist aktif yang sedang berjalan.
+function findActiveUnlockedChecklistCache() {
   let found = null;
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
     if (!k || !k.startsWith(CHECKLIST_PREFIX)) continue;
     try {
       const parsed = JSON.parse(localStorage.getItem(k));
-      if (parsed?.submittedAt && !parsed?.locked) {
-        if (!found || new Date(parsed.submittedAt) < new Date(found.submittedAt)) {
+      if (parsed && parsed.locked === false) {
+        if (!found || (parsed.dateStr && found.dateStr && parsed.dateStr < found.dateStr)) {
           found = parsed;
         }
       }
@@ -435,13 +435,25 @@ function findPendingUnsharedChecklistCache() {
 }
 
 // Cache lokal instan (dipakai sebagai initial state sebelum Supabase datang),
-// sama pola seperti loadMasterCached().
+// sama pola seperti loadMasterCached(). Urutan prioritas:
+// 1. Cache untuk key = hari ini, APAPUN statusnya (locked atau belum) — ini
+//    yang paling relevan dan paling akurat untuk device ini secara instan.
+// 2. Kalau belum ada cache untuk hari ini (device baru pertama kali dibuka
+//    hari ini di device ini), cari checklist unlocked dari hari sebelumnya
+//    yang masih carry-over (belum di-share) — supaya TIDAK sempat flash
+//    "form kosong" sesaat sebelum data server konfirmasi checklist mana
+//    yang sebenarnya aktif.
+// 3. Kalau benar-benar tidak ada cache relevan sama sekali → checklist baru
+//    kosong untuk hari ini (akan dikoreksi begitu server merespons kalau
+//    ternyata ada checklist aktif yang berbeda).
 export function loadChecklistCached() {
-  const pending = findPendingUnsharedChecklistCache();
-  if (pending) return pending;
   const todayStr = getTodayStr();
-  const existing = loadChecklistCacheByKey(todayStr);
-  if (existing) return existing;
+  const todayCache = loadChecklistCacheByKey(todayStr);
+  if (todayCache) return todayCache;
+
+  const carryOver = findActiveUnlockedChecklistCache();
+  if (carryOver) return carryOver;
+
   return emptyChecklist(todayStr, todayStr);
 }
 
@@ -482,9 +494,12 @@ export async function loadActiveChecklistFromServer(supabase) {
 }
 
 // Subscribe ke perubahan tabel stock_checklists lewat Supabase Realtime, supaya
-// begitu satu HP isi satu item, HP lain yang buka checklist yang sama (key sama)
-// langsung lihat progressnya tanpa reload. Balikin fungsi unsubscribe.
-export function subscribeStockChecklist(supabase, activeKey, onRemoteChange) {
+// begitu satu HP menyelesaikan satu kategori, HP lain yang buka checklist yang
+// sama (key sama) langsung lihat progressnya tanpa reload.
+// onResync (opsional) — lihat penjelasan lengkap di subscribeStockMaster di atas;
+// prinsip sama persis, cuma diterapkan ke channel checklist ini.
+// Balikin fungsi unsubscribe.
+export function subscribeStockChecklist(supabase, activeKey, onRemoteChange, onResync) {
   const channel = supabase
     .channel(`stock-checklist-${activeKey}`)
     .on(
@@ -497,7 +512,11 @@ export function subscribeStockChecklist(supabase, activeKey, onRemoteChange) {
         onRemoteChange(checklist);
       }
     )
-    .subscribe();
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED' && typeof onResync === 'function') {
+        onResync();
+      }
+    });
 
   return () => {
     supabase.removeChannel(channel);
