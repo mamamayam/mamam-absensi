@@ -1,3 +1,4 @@
+
 // ── Stock Checklist ────────────────────────────────────────────────────────
 //
 // Struktur data:
@@ -346,12 +347,34 @@ function emptyChecklist(key, dateStr) {
 }
 
 // Konversi row Supabase (snake_case) <-> bentuk lokal (camelCase) yang dipakai UI.
+// Kolom JSONB (values, category_done) NORMALNYA sudah jadi object JS begitu
+// diterima dari supabase-js, tapi payload realtime (postgres_changes) di
+// beberapa kondisi mengirimkannya sebagai STRING JSON mentah, bukan object
+// yang sudah di-parse. Kalau tidak diantisipasi, `row.category_done || {}`
+// akan menganggap string itu truthy dan memakainya apa adanya (bukan {}),
+// sehingga `checklist.categoryDone?.[id]` selalu undefined walau datanya
+// sebenarnya ada — inilah sumber bug "kategori sudah ditandai selesai di
+// server tapi device lain masih lihat belum selesai". Fungsi ini selalu
+// memastikan hasil akhirnya adalah OBJECT, entah dari object langsung atau
+// dari string yang perlu di-JSON.parse dulu.
+function parseJsonbField(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return value;
+}
+
 function rowToChecklist(row) {
   return {
     key: row.key,
     dateStr: row.date_str,
-    values: row.values || {},
-    categoryDone: row.category_done || {},
+    values: parseJsonbField(row.values, {}),
+    categoryDone: parseJsonbField(row.category_done, {}),
     submittedAt: row.submitted_at,
     submittedBy: row.submitted_by ?? null,
     sharedAt: row.shared_at,
