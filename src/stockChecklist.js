@@ -424,45 +424,36 @@ export function loadChecklistCached() {
 }
 
 // Ambil checklist aktif dari Supabase:
-// 1. Kalau ada row submitted tapi belum locked → itu yang aktif (harus dibagikan
-//    dulu / ke-lock dulu sebelum bisa mulai checklist baru), walau sudah ganti hari.
-// 2. Kalau tidak ada → pakai/buat row "hari ini" yang masih terbuka (belum locked).
-//    Kalau row "hari ini" sudah locked (siklus closed), buat checklist baru dengan
-//    key unik supaya tidak menimpa arsip yang sudah dibagikan.
+// 1. Kalau ada row locked=false yang PALING LAMA (belum di-share ke WA) →
+//    itu checklist aktif, walau `submitted_at` masih null (di model per-kategori,
+//    checklist bisa aktif & ada isian tanpa submitted_at terisi — submitted_at
+//    cuma keisi saat form KESELURUHAN ditekan "Selesai Isi Checklist").
+//    Ini juga otomatis carry-over checklist kemarin yang belum dibagikan,
+//    walau sudah ganti hari — sesuai aturan: checklist TIDAK reset sampai
+//    ada yang menekan "Bagikan ke WhatsApp".
+// 2. Kalau tidak ada row locked=false sama sekali → berarti checklist hari
+//    ini (kalau ada) sudah di-share/locked, atau belum ada row sama sekali →
+//    buat checklist baru dengan key = todayStr.
 export async function loadActiveChecklistFromServer(supabase) {
-  const { data: pendingRows, error: pendingErr } = await supabase
+  const { data: activeRows, error: activeErr } = await supabase
     .from(CHECKLIST_TABLE)
     .select('*')
-    .not('submitted_at', 'is', null)
     .eq('locked', false)
-    .order('submitted_at', { ascending: true })
+    .order('date_str', { ascending: true })
     .limit(1);
 
-  if (pendingErr) throw pendingErr;
+  if (activeErr) throw activeErr;
 
-  if (pendingRows && pendingRows.length > 0) {
-    const checklist = rowToChecklist(pendingRows[0]);
+  if (activeRows && activeRows.length > 0) {
+    const checklist = rowToChecklist(activeRows[0]);
     saveChecklistCache(checklist);
     return checklist;
   }
 
+  // Tidak ada row locked=false sama sekali → checklist hari ini (kalau ada)
+  // sudah dibagikan, atau memang belum pernah ada row → mulai checklist baru.
   const todayStr = getTodayStr();
-  const { data: todayRow, error: todayErr } = await supabase
-    .from(CHECKLIST_TABLE)
-    .select('*')
-    .eq('key', todayStr)
-    .maybeSingle();
-
-  if (todayErr) throw todayErr;
-
-  if (todayRow && !todayRow.locked) {
-    const checklist = rowToChecklist(todayRow);
-    saveChecklistCache(checklist);
-    return checklist;
-  }
-
-  // Belum ada row hari ini, atau row hari ini sudah locked → checklist baru.
-  const key = todayRow ? `${todayStr}-${generateStockId().slice(0, 8)}` : todayStr;
+  const key = todayStr;
   const fresh = emptyChecklist(key, todayStr);
   saveChecklistCache(fresh);
   return fresh;
