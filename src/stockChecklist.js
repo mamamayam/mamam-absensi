@@ -398,6 +398,7 @@ export function rowToChecklist(row) {
   };
 }
 
+<<<<<<< HEAD
 // ============================================================================
 // PENJAGA RACE CONDITION: "data lebih baru tidak boleh pernah ketiban data
 // lebih lama".
@@ -429,6 +430,8 @@ export function pickNewerChecklist(incoming, current) {
   return new Date(incoming.updatedAt) >= new Date(current.updatedAt) ? incoming : current;
 }
 
+=======
+>>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
 function loadChecklistCacheByKey(key) {
   try {
     const raw = localStorage.getItem(checklistStorageKey(key));

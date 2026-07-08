@@ -256,6 +256,11 @@ function EmployeeFlow({ employees }) {
 
   // Gate "Absen Pulang" — dikunci sampai Stock List checklist selesai diisi.
   const [stockGate, setStockGate] = useState({ gateOpen: true, hasItems: false, complete: false });
+  // Notif yang muncul begitu gate baru saja kebuka (checklist selesai dibagikan
+  // ke WhatsApp) — supaya karyawan yang lagi nunggu di layar langsung tahu,
+  // gak perlu manual cek/klik ulang tab "Pulang".
+  const [stockGateJustOpened, setStockGateJustOpened] = useState(false);
+  const prevGateOpenRef = useRef(stockGate.gateOpen);
 
   // --- Step 1: pilih nama ---
   const handlePickEmployee = async (emp) => {
@@ -263,6 +268,7 @@ function EmployeeFlow({ employees }) {
     setSubmitError('');
     setCheckingStatus(true);
     setTodayStatus(null);
+    setStockGateJustOpened(false);
     try {
       const todayStr = getTodayStr();
       const { data: rows } = await supabase
@@ -330,6 +336,23 @@ function EmployeeFlow({ employees }) {
   }, [step]);
 
   const sudahLengkapHariIni = todayStatus?.lastType === 'keluar';
+
+  // Begitu gate absen pulang baru saja kebuka (checklist stock selesai &
+  // dibagikan ke WhatsApp — bisa dari device sendiri atau device lain lewat
+  // realtime), otomatis pindahkan pilihan ke tab "Pulang" dan tampilkan notif,
+  // supaya karyawan yang lagi standby di layar (absenType masih 'bolong' karena
+  // tab Pulang tadinya ke-disable) tidak perlu ngeh/klik manual sendiri.
+  useEffect(() => {
+    const wasClosed = prevGateOpenRef.current === false;
+    prevGateOpenRef.current = stockGate.gateOpen;
+    if (wasClosed && stockGate.gateOpen) {
+      setStockGateJustOpened(true);
+      if (todayStatus?.hasMasuk && !sudahLengkapHariIni && absenType === 'bolong') {
+        setAbsenType('keluar');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stockGate.gateOpen]);
 
   const canNext = {
     1: !!employee && !checkingStatus && !sudahLengkapHariIni,
@@ -471,6 +494,7 @@ function EmployeeFlow({ employees }) {
     setDistance(null);
     setDone(null);
     setSubmitError('');
+    setStockGateJustOpened(false);
   };
 
   // ── Layar sukses ─────────────────────────────────────────────────────────────
@@ -556,6 +580,17 @@ function EmployeeFlow({ employees }) {
 
         {/* Body form */}
         <div className="bg-white rounded-b-3xl shadow-xl p-5 pt-6">
+
+          {/* Notif: checklist stock baru saja selesai diisi & dibagikan ke
+              WhatsApp, jadi absen pulang sekarang terbuka. */}
+          {stockGateJustOpened && stockGate.gateOpen && !sudahLengkapHariIni && (
+            <div className="flex items-center gap-2.5 bg-green-50 border border-green-200 rounded-xl px-3.5 py-3 mb-3">
+              <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0" />
+              <p className="text-xs text-green-700 font-medium leading-relaxed">
+                Form checklist sudah diisi. Silahkan absen pulang.
+              </p>
+            </div>
+          )}
 
           {/* Pilihan tipe absen — dinamis sesuai status karyawan */}
           {(todayStatus?.lastType === 'masuk' || todayStatus?.lastType === 'masuk_lagi') && !sudahLengkapHariIni && (
