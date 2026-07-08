@@ -507,6 +507,27 @@ export function loadChecklistCached() {
 //    ini (kalau ada) sudah di-share/locked, atau belum ada row sama sekali →
 //    buat checklist baru dengan key = todayStr.
 export async function loadActiveChecklistFromServer(supabase) {
+  const todayStr = getTodayStr();
+
+  // 1. Cek dulu row untuk HARI INI, locked atau enggak — kalau ada, ini yang
+  //    paling benar buat direpresentasikan (termasuk kalau sudah di-share/locked,
+  //    supaya form TIDAK balik ke kosong pas refresh setelah share).
+  const { data: todayRows, error: todayErr } = await supabase
+    .from(CHECKLIST_TABLE)
+    .select('*')
+    .eq('date_str', todayStr)
+    .limit(1);
+
+  if (todayErr) throw todayErr;
+
+  if (todayRows && todayRows.length > 0) {
+    const checklist = rowToChecklist(todayRows[0]);
+    saveChecklistCache(checklist);
+    return checklist;
+  }
+
+  // 2. Belum ada row untuk hari ini → cek carry-over: checklist unlocked
+  //    paling lama dari hari sebelumnya yang belum sempat dibagikan.
   const { data: activeRows, error: activeErr } = await supabase
     .from(CHECKLIST_TABLE)
     .select('*')
@@ -522,11 +543,8 @@ export async function loadActiveChecklistFromServer(supabase) {
     return checklist;
   }
 
-  // Tidak ada row locked=false sama sekali → checklist hari ini (kalau ada)
-  // sudah dibagikan, atau memang belum pernah ada row → mulai checklist baru.
-  const todayStr = getTodayStr();
-  const key = todayStr;
-  const fresh = emptyChecklist(key, todayStr);
+  // 3. Gak ada row hari ini maupun carry-over → checklist baru kosong.
+  const fresh = emptyChecklist(todayStr, todayStr);
   saveChecklistCache(fresh);
   return fresh;
 }
