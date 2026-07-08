@@ -11,11 +11,7 @@ import {
   addItem, updateItem, deleteItem, allItemsFlat, seedDefaultStock,
   loadChecklistCached, loadActiveChecklistFromServer, subscribeStockChecklist,
   completeCategory, reopenCategory, isCategoryFilledComplete, categoryRequiredProgress,
-<<<<<<< HEAD
   isChecklistComplete, isChecklistLocked, pickNewerChecklist,
-=======
-  isChecklistComplete, isChecklistLocked,
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
   submitChecklist, markShared,
   formatWhatsAppText, buildWhatsAppShareUrl,
   reorderCategory, reorderItem, moveItemToCategory,
@@ -114,11 +110,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
         const serverChecklist = await loadActiveChecklistFromServer(supabase);
         if (cancelled) return;
         setChecklistSyncError('');
-<<<<<<< HEAD
         setChecklist((prev) => pickNewerChecklist(serverChecklist, prev));
-=======
-        setChecklist(serverChecklist);
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
       } catch (err) {
         if (cancelled) return;
         // Gagal konek — tetap pakai cache lokal, kasih tau user datanya
@@ -156,11 +148,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
       checklist.key,
       (remoteChecklist) => {
         if (cancelled) return;
-<<<<<<< HEAD
         setChecklist((prev) => pickNewerChecklist(remoteChecklist, prev));
-=======
-        setChecklist(remoteChecklist);
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
         setChecklistSyncError('');
       },
       () => {
@@ -168,16 +156,12 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
         loadActiveChecklistFromServer(supabase)
           .then((fresh) => {
             if (cancelled) return;
-<<<<<<< HEAD
             // GUARD PENTING: fetch reconcile ini bisa saja mulai duluan tapi
             // baru selesai BELAKANGAN (misal koneksi lambat) — kalau user
             // sempat menyelesaikan kategori lain SAAT fetch ini masih
             // berjalan, hasil fetch basi ini TIDAK BOLEH menimpa balik state
             // yang sudah lebih baru. pickNewerChecklist yang menjaga ini.
             setChecklist((prev) => pickNewerChecklist(fresh, prev));
-=======
-            setChecklist(fresh);
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
             setChecklistSyncError('');
           })
           .catch(() => {
@@ -271,23 +255,16 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
       ...checklist,
       values: { ...checklist.values, ...draftValues },
       categoryDone: { ...checklist.categoryDone, [category.id]: true },
-<<<<<<< HEAD
       // Stempel waktu "sekarang" di prediksi optimistic ini, supaya kalau ada
       // respons server basi (misal onResync yang mulai duluan) datang belakangan,
       // dia dianggap LEBIH LAMA dan tidak menimpa prediksi ini sebelum hasil
       // RPC completeCategory yang sebenarnya datang.
       updatedAt: new Date().toISOString(),
-=======
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
     };
     setChecklist(optimistic);
     try {
       const merged = await completeCategory(supabase, checklist, category.id, draftValues);
-<<<<<<< HEAD
       setChecklist((prev) => pickNewerChecklist(merged, prev));
-=======
-      setChecklist(merged);
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
       setChecklistSyncError('');
     } catch (err) {
       setChecklistSyncError('Gagal menyimpan kategori ke server. Cek koneksi lalu coba lagi.');
@@ -301,7 +278,6 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   const handleReopenCategory = async (category) => {
     if (locked || savingCategory) return;
     setSavingCategory(true);
-<<<<<<< HEAD
     const optimistic = {
       ...checklist,
       categoryDone: { ...checklist.categoryDone, [category.id]: false },
@@ -311,13 +287,6 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     try {
       const merged = await reopenCategory(supabase, checklist, category.id);
       setChecklist((prev) => pickNewerChecklist(merged, prev));
-=======
-    const optimistic = { ...checklist, categoryDone: { ...checklist.categoryDone, [category.id]: false } };
-    setChecklist(optimistic);
-    try {
-      const merged = await reopenCategory(supabase, checklist, category.id);
-      setChecklist(merged);
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
       setChecklistSyncError('');
     } catch (err) {
       setChecklistSyncError('Gagal membuka kategori. Cek koneksi lalu coba lagi.');
@@ -330,16 +299,12 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     // Agung Prayoga boleh bypass kelengkapan checklist (misal buru-buru / item
     // fisiknya belum sempat dicek semua) — selain dia, tetap wajib complete dulu.
     if ((!complete && !canBypassChecklist) || locked) return;
-<<<<<<< HEAD
     const optimistic = {
       ...checklist,
       submittedAt: new Date().toISOString(),
       submittedBy: currentEmployeeName || null,
       updatedAt: new Date().toISOString(),
     };
-=======
-    const optimistic = { ...checklist, submittedAt: new Date().toISOString(), submittedBy: currentEmployeeName || null };
->>>>>>> 3ef75f7502957a26c60efc5ad53edb35e5cb20e2
     setChecklist(optimistic);
     try {
       const saved = await submitChecklist(supabase, checklist, currentEmployeeName);
