@@ -10,7 +10,8 @@ import {
   addCategory, renameCategory, deleteCategory,
   addItem, updateItem, deleteItem, allItemsFlat, seedDefaultStock,
   loadChecklistCached, loadActiveChecklistFromServer, subscribeStockChecklist,
-  setItemValue, isChecklistComplete, isChecklistLocked,
+  completeCategory, reopenCategory, isCategoryFilledComplete, categoryRequiredProgress,
+  isChecklistComplete, isChecklistLocked, pickNewerChecklist,
   submitChecklist, markShared,
   formatWhatsAppText, buildWhatsAppShareUrl,
   reorderCategory, reorderItem, moveItemToCategory,
@@ -39,16 +40,29 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   const [manageOpen, setManageOpen] = useState(false);
   const [selectedCategoryId, setSelectedCategoryId] = useState('');
   const [justShared, setJustShared] = useState(false);
+  // Draft lokal isian kategori yang SEDANG dibuka untuk diedit (belum di-push
+  // ke server). Key = itemId, value = { qty, skipped }. Direset/diisi ulang
+  // dari checklist.values setiap kali pindah kategori. Push ke server hanya
+  // terjadi sekali, saat tombol "Selesai" kategori ditekan — BUKAN per-keystroke,
+  // supaya ngetik angka panjang (ratusan/ribuan) tidak nge-lag karena tiap
+  // karakter push ke Supabase.
+  const [draftValues, setDraftValues] = useState({});
+  const [savingCategory, setSavingCategory] = useState(false);
 
   const canManage = isStockAdmin(currentEmployeeName);
+  // Agung Prayoga juga boleh langsung "Selesai Isi Checklist" & bagikan ke WA
+  // walau item wajib belum lengkap semua (bypass khusus dia saja).
+  const canBypassChecklist = isStockAdmin(currentEmployeeName);
 
   // Ambil master terbaru dari Supabase saat komponen mount, lalu subscribe
   // supaya perubahan dari device lain (misal admin edit di laptop) otomatis
-  // masuk ke sini tanpa perlu reload.
+  // masuk ke sini tanpa perlu reload. onResync di subscribeStockMaster bikin
+  // effect ini juga re-fetch tiap kali channel realtime (re)connect, jaga-jaga
+  // ada perubahan yang kelewat selama koneksi sempat putus.
   useEffect(() => {
     let cancelled = false;
 
-    (async () => {
+    const refetchMaster = async () => {
       try {
         const serverMaster = await loadMasterFromServer(supabase);
         if (cancelled) return;
@@ -59,15 +73,25 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
         // Gagal konek — tetap pakai cache lokal yang sudah ke-load duluan,
         // cuma kasih tau user datanya mungkin belum yang terbaru.
         setMasterSyncError('Gagal sinkron data terbaru, menampilkan data tersimpan di device ini.');
-      } finally {
-        if (!cancelled) setMasterLoading(false);
       }
+    };
+
+    (async () => {
+      await refetchMaster();
+      if (!cancelled) setMasterLoading(false);
     })();
 
-    const unsubscribe = subscribeStockMaster(supabase, (remoteMaster) => {
-      setMaster(remoteMaster);
-      setMasterSyncError('');
-    });
+    const unsubscribe = subscribeStockMaster(
+      supabase,
+      (remoteMaster) => {
+        if (cancelled) return;
+        setMaster(remoteMaster);
+        setMasterSyncError('');
+      },
+      () => {
+        if (!cancelled) refetchMaster();
+      }
+    );
 
     return () => {
       cancelled = true;
@@ -75,24 +99,18 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     };
   }, []);
 
-  // Ambil checklist aktif dari Supabase saat mount, lalu subscribe by key
-  // supaya progress isi antar HP sinkron real-time (bagi tugas isi form) dan
-  // lock/share dari satu device langsung kelihatan di device lain.
+  // Effect A: ambil checklist aktif dari server SEKALI saat mount. State
+  // `checklist` di-set dari sini (atau dari cache lokal duluan sebagai initial
+  // state, lihat useState di atas).
   useEffect(() => {
     let cancelled = false;
-    let unsubscribe = () => {};
 
     (async () => {
       try {
         const serverChecklist = await loadActiveChecklistFromServer(supabase);
         if (cancelled) return;
         setChecklistSyncError('');
-        setChecklist(serverChecklist);
-
-        unsubscribe = subscribeStockChecklist(supabase, serverChecklist.key, (remoteChecklist) => {
-          setChecklist(remoteChecklist);
-          setChecklistSyncError('');
-        });
+        setChecklist((prev) => pickNewerChecklist(serverChecklist, prev));
       } catch (err) {
         if (cancelled) return;
         // Gagal konek — tetap pakai cache lokal, kasih tau user datanya
@@ -105,9 +123,60 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
     return () => {
       cancelled = true;
-      unsubscribe();
     };
   }, []);
+
+  // Effect B: subscribe realtime ke key checklist yang SEDANG aktif (bukan
+  // cuma sekali pas mount) — effect ini sengaja depend ke `checklist.key`,
+  // supaya kalau key aktif berubah selama komponen masih terbuka (misal
+  // checklist di-share lalu device ini lanjut ke checklist baru tanpa reload
+  // halaman), koneksi realtime otomatis pindah mendengarkan key yang baru,
+  // bukan nyangkut dengerin key lama yang sudah tidak relevan.
+  //
+  // onResync dipanggil setiap channel (re)connect (termasuk tiap kali sesudah
+  // koneksi realtime sempat putus-nyambung) — re-fetch dari server supaya
+  // tidak ada perubahan device lain yang KELEWAT selama jendela disconnect.
+  // Kalau ternyata ada checklist aktif yang berbeda, setChecklist di sini akan
+  // mengubah checklist.key, yang otomatis men-trigger effect ini lagi untuk
+  // pindah subscribe ke key yang benar — self-correcting.
+  useEffect(() => {
+    if (!checklist.key) return;
+    let cancelled = false;
+
+    const unsubscribe = subscribeStockChecklist(
+      supabase,
+      checklist.key,
+      (remoteChecklist) => {
+        if (cancelled) return;
+        setChecklist((prev) => pickNewerChecklist(remoteChecklist, prev));
+        setChecklistSyncError('');
+      },
+      () => {
+        if (cancelled) return;
+        loadActiveChecklistFromServer(supabase)
+          .then((fresh) => {
+            if (cancelled) return;
+            // GUARD PENTING: fetch reconcile ini bisa saja mulai duluan tapi
+            // baru selesai BELAKANGAN (misal koneksi lambat) — kalau user
+            // sempat menyelesaikan kategori lain SAAT fetch ini masih
+            // berjalan, hasil fetch basi ini TIDAK BOLEH menimpa balik state
+            // yang sudah lebih baru. pickNewerChecklist yang menjaga ini.
+            setChecklist((prev) => pickNewerChecklist(fresh, prev));
+            setChecklistSyncError('');
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setChecklistSyncError('Gagal sinkron ulang checklist. Cek koneksi.');
+            }
+          });
+      }
+    );
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [checklist.key]);
 
   // Karyawan biasa gak boleh buka panel kelola — kalau somehow kebuka lalu
   // gantian pilih nama yang bukan admin, tutup paksa panelnya.
@@ -135,6 +204,21 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     }
   }, [master.categories, selectedCategoryId]);
 
+  // Setiap kali pindah kategori (atau checklist berubah dari server/realtime),
+  // sinkronkan draft lokal dari nilai tersimpan kategori itu — supaya kalau
+  // device lain sudah isi sebagian item kategori ini sebelumnya, draft mulai
+  // dari situ, bukan kosong.
+  useEffect(() => {
+    const cat = master.categories.find((c) => c.id === selectedCategoryId);
+    if (!cat) return;
+    const next = {};
+    for (const it of cat.items) {
+      next[it.id] = checklist.values[it.id] || { qty: '', skipped: false };
+    }
+    setDraftValues(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategoryId, master.categories, checklist.key]);
+
   // Optimistic update: UI langsung berubah pakai `next`, baru kemudian
   // disimpan ke Supabase di background. Kalau gagal simpan, kasih tau user
   // lewat masterSyncError (datanya tetap ada di layar, cuma belum ke-sync).
@@ -147,32 +231,84 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
       setMasterSyncError('Gagal menyimpan perubahan ke server. Cek koneksi lalu coba lagi.');
     }
   };
-  // Optimistic update sama pola seperti refreshMaster: UI langsung berubah,
-  // baru disimpan ke Supabase di background. Device lain akan menerima
-  // perubahan ini lewat subscribeStockChecklist, jadi tidak perlu di-push manual.
-  const handleSetValue = async (itemId, patch) => {
-    if (locked) return; // sudah terkunci (ada yang submit ke WA) — gak bisa diedit lagi
+  // Cuma update state lokal (draft) — TIDAK push ke Supabase per-keystroke.
+  // Push beneran terjadi sekali di handleCompleteCategory saat tombol
+  // "Selesai" kategori ditekan.
+  const handleDraftChange = (itemId, patch) => {
+    if (locked) return;
+    setDraftValues((prev) => ({
+      ...prev,
+      [itemId]: { qty: patch.qty ?? '', skipped: !!patch.skipped },
+    }));
+  };
+
+  // Tandai kategori terpilih selesai: push SEMUA item kategori ini sekaligus
+  // (satu RPC atomic), server jadi sumber kebenaran hasil merge-nya.
+  const handleCompleteCategory = async (category) => {
+    if (locked || savingCategory) return;
+    // Validasi lokal dulu — draft sementara dianggap "checklist" utk dicek.
+    const draftAsChecklist = { ...checklist, values: { ...checklist.values, ...draftValues } };
+    if (!isCategoryFilledComplete(category, draftAsChecklist)) return;
+
+    setSavingCategory(true);
     const optimistic = {
       ...checklist,
-      values: { ...checklist.values, [itemId]: { qty: patch.qty ?? null, skipped: !!patch.skipped } },
-      submittedAt: null,
+      values: { ...checklist.values, ...draftValues },
+      categoryDone: { ...checklist.categoryDone, [category.id]: true },
+      // Stempel waktu "sekarang" di prediksi optimistic ini, supaya kalau ada
+      // respons server basi (misal onResync yang mulai duluan) datang belakangan,
+      // dia dianggap LEBIH LAMA dan tidak menimpa prediksi ini sebelum hasil
+      // RPC completeCategory yang sebenarnya datang.
+      updatedAt: new Date().toISOString(),
     };
     setChecklist(optimistic);
     try {
-      await setItemValue(supabase, checklist, itemId, patch);
+      const merged = await completeCategory(supabase, checklist, category.id, draftValues);
+      setChecklist((prev) => pickNewerChecklist(merged, prev));
       setChecklistSyncError('');
     } catch (err) {
-      setChecklistSyncError('Gagal menyimpan isian ke server. Cek koneksi lalu coba lagi.');
+      setChecklistSyncError('Gagal menyimpan kategori ke server. Cek koneksi lalu coba lagi.');
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
+  // Buka lagi kategori yang sudah ditandai selesai supaya bisa dikoreksi,
+  // sebelum checklist keseluruhan di-share ke WhatsApp.
+  const handleReopenCategory = async (category) => {
+    if (locked || savingCategory) return;
+    setSavingCategory(true);
+    const optimistic = {
+      ...checklist,
+      categoryDone: { ...checklist.categoryDone, [category.id]: false },
+      updatedAt: new Date().toISOString(),
+    };
+    setChecklist(optimistic);
+    try {
+      const merged = await reopenCategory(supabase, checklist, category.id);
+      setChecklist((prev) => pickNewerChecklist(merged, prev));
+      setChecklistSyncError('');
+    } catch (err) {
+      setChecklistSyncError('Gagal membuka kategori. Cek koneksi lalu coba lagi.');
+    } finally {
+      setSavingCategory(false);
     }
   };
 
   const handleSubmit = async () => {
-    if (!complete || locked) return;
-    const optimistic = { ...checklist, submittedAt: new Date().toISOString(), submittedBy: currentEmployeeName || null };
+    // Agung Prayoga boleh bypass kelengkapan checklist (misal buru-buru / item
+    // fisiknya belum sempat dicek semua) — selain dia, tetap wajib complete dulu.
+    if ((!complete && !canBypassChecklist) || locked) return;
+    const optimistic = {
+      ...checklist,
+      submittedAt: new Date().toISOString(),
+      submittedBy: currentEmployeeName || null,
+      updatedAt: new Date().toISOString(),
+    };
     setChecklist(optimistic);
     try {
       const saved = await submitChecklist(supabase, checklist, currentEmployeeName);
-      setChecklist(saved);
+      setChecklist((prev) => pickNewerChecklist(saved, prev));
       setChecklistSyncError('');
     } catch (err) {
       setChecklistSyncError('Gagal menyimpan checklist ke server. Cek koneksi lalu coba lagi.');
@@ -186,7 +322,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     setJustShared(true);
     try {
       const saved = await markShared(supabase, checklist);
-      setChecklist(saved); // locked=true — otomatis kebuka gate absen di device ini,
+      setChecklist((prev) => pickNewerChecklist(saved, prev)); // locked=true — otomatis kebuka gate absen di device ini,
       setChecklistSyncError(''); // dan lewat realtime, di semua device lain juga.
     } catch (err) {
       setChecklistSyncError('Gagal mengunci checklist di server. Coba tekan bagikan lagi.');
@@ -292,7 +428,7 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
           {items.length > 0 && !locked && (
             <>
-              {/* Dropdown kategori */}
+              {/* Dropdown kategori — tiap opsi nampilin progress item wajib & status selesai */}
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-stone-500 block">Kategori</label>
                 <select
@@ -300,77 +436,158 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                   onChange={(e) => setSelectedCategoryId(e.target.value)}
                   className="w-full border border-stone-200 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 bg-white"
                 >
-                  {master.categories.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.items.length})
-                    </option>
-                  ))}
+                  {master.categories.map((c) => {
+                    const { filled, total } = categoryRequiredProgress(c, checklist);
+                    const done = !!checklist.categoryDone?.[c.id];
+                    const label =
+                      total === 0
+                        ? `${c.name} (${c.items.length})`
+                        : `${c.name} — ${done ? '✓ Selesai' : `${filled}/${total} wajib`}`;
+                    return (
+                      <option key={c.id} value={c.id}>
+                        {label}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
-              {/* Sub-kategori / item dalam kategori terpilih */}
-              {selectedCategory && (
-                <div className="space-y-2.5">
-                  {selectedCategory.items.length === 0 && (
-                    <p className="text-xs text-stone-400 italic">Belum ada item di kategori ini.</p>
-                  )}
-                  {selectedCategory.items.map((it) => {
-                    const v = checklist.values[it.id];
-                    const filled = v && v.qty !== null && v.qty !== '';
-                    return (
-                      <div
-                        key={it.id}
-                        className={`rounded-2xl border px-3.5 py-3 ${
-                          filled ? 'border-green-200 bg-green-50/40' : 'border-stone-200'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between mb-1.5">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            {filled ? (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-green-600 shrink-0" />
-                            ) : (
-                              <Circle className="w-3.5 h-3.5 text-stone-300 shrink-0" />
-                            )}
-                            <span className="text-sm font-medium text-stone-700 truncate">{it.name}</span>
-                          </div>
-                          <span
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ml-2 ${
-                              it.required ? 'bg-red-50 text-red-500' : 'bg-stone-100 text-stone-400'
-                            }`}
-                          >
-                            {it.required ? 'WAJIB' : 'OPSIONAL'}
+              {/* Kategori terpilih: kalau sudah "Selesai" tampilkan ringkasan +
+                  tombol Edit lagi; kalau belum, tampilkan form isi item + tombol Selesai. */}
+              {selectedCategory && (() => {
+                const catDone = !!checklist.categoryDone?.[selectedCategory.id];
+                const { filled, total } = categoryRequiredProgress(selectedCategory, checklist);
+                const draftAsChecklist = { ...checklist, values: { ...checklist.values, ...draftValues } };
+                const canCompleteThisCategory = isCategoryFilledComplete(selectedCategory, draftAsChecklist);
+
+                if (catDone) {
+                  return (
+                    <div className="space-y-2.5">
+                      <div className="flex items-center justify-between bg-green-50 border border-green-200 rounded-xl px-3.5 py-2.5">
+                        <div className="flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" />
+                          <span className="text-xs font-bold text-green-700">
+                            Kategori ini sudah selesai diisi
                           </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="number"
-                            inputMode="decimal"
-                            min="0"
-                            placeholder="Jumlah stock"
-                            value={v?.qty ?? ''}
-                            onChange={(e) =>
-                              handleSetValue(it.id, { qty: e.target.value, skipped: false })
-                            }
-                            className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-                          />
-                          <span className="text-xs text-stone-400 w-14 shrink-0">{it.unit || '-'}</span>
-                        </div>
+                        <button
+                          onClick={() => handleReopenCategory(selectedCategory)}
+                          disabled={savingCategory}
+                          className="text-[11px] font-bold text-orange-600 bg-white px-2.5 py-1.5 rounded-lg border border-orange-200 disabled:opacity-50 shrink-0"
+                        >
+                          Edit lagi
+                        </button>
                       </div>
-                    );
-                  })}
-                </div>
+                      <div className="space-y-1.5">
+                        {selectedCategory.items.map((it) => {
+                          const v = checklist.values[it.id];
+                          const filledV = v && v.qty !== null && v.qty !== '';
+                          return (
+                            <div key={it.id} className="flex items-center justify-between text-xs px-1">
+                              <span className="text-stone-600 truncate">{it.name}</span>
+                              <span className="font-medium text-stone-800 shrink-0 ml-2">
+                                {filledV ? `${v.qty} ${it.unit || ''}`.trim() : '—'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-2.5">
+                    {total > 0 && (
+                      <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-xl px-3.5 py-2">
+                        <span className="text-[11px] font-bold text-stone-500">
+                          {filled}/{total} item wajib terisi
+                        </span>
+                      </div>
+                    )}
+                    {selectedCategory.items.length === 0 && (
+                      <p className="text-xs text-stone-400 italic">Belum ada item di kategori ini.</p>
+                    )}
+                    {selectedCategory.items.map((it) => {
+                      const v = draftValues[it.id];
+                      const filledV = v && v.qty !== null && v.qty !== '';
+                      return (
+                        <div
+                          key={it.id}
+                          className={`rounded-2xl border px-3.5 py-3 ${
+                            filledV ? 'border-green-200 bg-green-50/40' : 'border-stone-200'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {filledV ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-green-600 shrink-0" />
+                              ) : (
+                                <Circle className="w-3.5 h-3.5 text-stone-300 shrink-0" />
+                              )}
+                              <span className="text-sm font-medium text-stone-700 truncate">{it.name}</span>
+                            </div>
+                            <span
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ml-2 ${
+                                it.required ? 'bg-red-50 text-red-500' : 'bg-stone-100 text-stone-400'
+                              }`}
+                            >
+                              {it.required ? 'WAJIB' : 'OPSIONAL'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              min="0"
+                              placeholder="Jumlah stock"
+                              value={v?.qty ?? ''}
+                              onChange={(e) =>
+                                handleDraftChange(it.id, { qty: e.target.value, skipped: false })
+                              }
+                              className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                            />
+                            <span className="text-xs text-stone-400 w-14 shrink-0">{it.unit || '-'}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {!canCompleteThisCategory && selectedCategory.items.length > 0 && (
+                      <p className="text-[11px] text-amber-600 text-center">
+                        Lengkapi semua item wajib di kategori ini dulu untuk menandai selesai.
+                      </p>
+                    )}
+
+                    {selectedCategory.items.length > 0 && (
+                      <button
+                        onClick={() => handleCompleteCategory(selectedCategory)}
+                        disabled={!canCompleteThisCategory || savingCategory}
+                        className="w-full bg-stone-800 disabled:bg-stone-200 disabled:text-stone-400 text-white font-bold py-2.5 rounded-xl transition text-sm"
+                      >
+                        {savingCategory ? 'Menyimpan...' : 'Selesai Kategori Ini'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {!complete && !canBypassChecklist && (
+                <p className="text-[11px] text-amber-600 text-center">
+                  Selesaikan semua kategori wajib dulu untuk bisa lanjut bagikan ke WhatsApp.
+                </p>
               )}
 
-              {!complete && (
-                <p className="text-[11px] text-amber-600 text-center">
-                  Lengkapi semua item wajib untuk lanjut. Item opsional boleh dilewati.
+              {!complete && canBypassChecklist && (
+                <p className="text-[11px] text-orange-600 text-center font-medium">
+                  Kategori wajib belum semua selesai, tapi kamu bisa lanjutkan (khusus Agung Prayoga).
                 </p>
               )}
 
               {!alreadySubmitted ? (
                 <button
                   onClick={handleSubmit}
-                  disabled={!complete}
+                  disabled={!complete && !canBypassChecklist}
                   className="w-full bg-orange-600 disabled:bg-stone-200 disabled:text-stone-400 text-white font-bold py-3 rounded-xl transition"
                 >
                   Selesai Isi Checklist
