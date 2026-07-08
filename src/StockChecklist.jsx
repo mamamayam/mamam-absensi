@@ -329,6 +329,16 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     }
   };
 
+  // Dipakai SETELAH checklist locked — beda dari handleShare karena di sini
+  // TIDAK perlu panggil markShared/RPC lagi (checklist sudah locked, values
+  // juga tidak berubah). Ini murni buka ulang teks WA yang sama dari data
+  // checklist yang sudah tersimpan, supaya bisa dibagikan ulang kapan saja
+  // tanpa batas (misal ada yang minta dikirim ulang, atau grup WA beda).
+  const handleShareAgain = () => {
+    const text = formatWhatsAppText(checklist, master);
+    window.open(buildWhatsAppShareUrl(text), '_blank');
+  };
+
   const selectedCategory = master.categories.find((c) => c.id === selectedCategoryId);
 
   return (
@@ -616,6 +626,15 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                   ? `Terkirim ${new Date(checklist.sharedAt).toLocaleString('id-ID')}`
                   : 'Form ini sudah dikunci, absen pulang terbuka.'}
               </p>
+              {/* Hasil checklist tetap tersimpan di server walau sudah locked,
+                  jadi tombol ini bisa dipencet berkali-kali kapan saja untuk
+                  bagikan ulang teks yang sama — tanpa mengubah data / status. */}
+              <button
+                onClick={handleShareAgain}
+                className="mt-3 mx-auto flex items-center justify-center gap-2 text-sm font-bold text-green-700 bg-green-50 hover:bg-green-100 px-4 py-2 rounded-xl transition"
+              >
+                <Share2 className="w-4 h-4" /> Bagikan Lagi ke WhatsApp
+              </button>
             </div>
           )}
 
