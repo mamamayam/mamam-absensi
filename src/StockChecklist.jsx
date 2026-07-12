@@ -48,6 +48,10 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
   // karakter push ke Supabase.
   const [draftValues, setDraftValues] = useState({});
   const [savingCategory, setSavingCategory] = useState(false);
+  // Loading khusus saat handleShareAgain terpaksa fetch ulang dari server
+  // (state lokal kedeteksi kosong/basi) — biar tombol tidak dobel-klik
+  // dan user tau lagi ngambil data, bukan cuma diam.
+  const [shareAgainLoading, setShareAgainLoading] = useState(false);
 
   const canManage = isStockAdmin(currentEmployeeName);
   // Agung Prayoga juga boleh langsung "Selesai Isi Checklist" & bagikan ke WA
@@ -327,6 +331,37 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     } catch (err) {
       setChecklistSyncError('Gagal mengunci checklist di server. Coba tekan bagikan lagi.');
     }
+  };
+
+  // Dipakai SETELAH checklist locked — beda dari handleShare karena di sini
+  // TIDAK perlu panggil markShared/RPC lagi (checklist sudah locked, values
+  // juga tidak berubah). Ini murni buka ulang teks WA yang sama dari data
+  // checklist yang sudah tersimpan, supaya bisa dibagikan ulang kapan saja
+  // tanpa batas (misal ada yang minta dikirim ulang, atau grup WA beda).
+  const handleShareAgain = async () => {
+    if (shareAgainLoading) return;
+    // Guard: kalau state `checklist` di device ini ternyata gak punya isian
+    // sama sekali padahal statusnya locked (harusnya mustahil buat checklist
+    // yang beneran sudah di-share — locked hanya terjadi setelah ada isian),
+    // ini tanda state lokal kena race/basi (lihat pickNewerChecklist). Fetch
+    // ulang dulu dari server sebelum generate teks, supaya gak pernah buka
+    // WhatsApp dengan pesan kosong.
+    if (Object.keys(checklist.values || {}).length === 0) {
+      setShareAgainLoading(true);
+      try {
+        const fresh = await loadActiveChecklistFromServer(supabase);
+        setChecklist((prev) => pickNewerChecklist(fresh, prev));
+        const text = formatWhatsAppText(fresh, master);
+        window.open(buildWhatsAppShareUrl(text), '_blank');
+      } catch (err) {
+        setChecklistSyncError('Gagal mengambil data checklist. Cek koneksi lalu coba lagi.');
+      } finally {
+        setShareAgainLoading(false);
+      }
+      return;
+    }
+    const text = formatWhatsAppText(checklist, master);
+    window.open(buildWhatsAppShareUrl(text), '_blank');
   };
 
   const selectedCategory = master.categories.find((c) => c.id === selectedCategoryId);
@@ -616,6 +651,21 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                   ? `Terkirim ${new Date(checklist.sharedAt).toLocaleString('id-ID')}`
                   : 'Form ini sudah dikunci, absen pulang terbuka.'}
               </p>
+              {/* Hasil checklist tetap tersimpan di server walau sudah locked,
+                  jadi tombol ini bisa dipencet berkali-kali kapan saja untuk
+                  bagikan ulang teks yang sama — tanpa mengubah data / status. */}
+              <button
+                onClick={handleShareAgain}
+                disabled={shareAgainLoading}
+                className="mt-3 mx-auto flex items-center justify-center gap-2 text-sm font-bold text-green-700 bg-green-50 hover:bg-green-100 disabled:opacity-60 px-4 py-2 rounded-xl transition"
+              >
+                {shareAgainLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Share2 className="w-4 h-4" />
+                )}
+                {shareAgainLoading ? 'Mengambil data...' : 'Bagikan Lagi ke WhatsApp'}
+              </button>
             </div>
           )}
 

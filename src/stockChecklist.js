@@ -420,11 +420,34 @@ export function rowToChecklist(row) {
 // (bukan soal timing) — langsung terima. Kalau key sama, cuma terima kalau
 // updatedAt versi baru >= yang sedang ada. Kalau salah satu tidak punya
 // updatedAt (data lama / edge case), anggap aman untuk diterima (fail-open,
-// supaya tidak ada state yang "macet" gara-gara metadata hilang).
+// supaya tidak ada state yang "macet" gara-gara metadata hilang) — KECUALI
+// kalau incoming itu ternyata checklist KOSONG (lihat isEmptyChecklist di
+// bawah), karena checklist kosong nimpa checklist yang sudah terisi adalah
+// justru bug paling merusak yang mau dicegah fungsi ini (values keliatan
+// hilang total pas share/refresh). Sumber checklist kosong yang "menang"
+// gara-gara updatedAt basi/hilang: loadActiveChecklistFromServer() fallback
+// ke emptyChecklist() waktu row belum sempat ke-commit/ke-baca (race saat
+// RPC completeCategory device lain masih berjalan), lalu emptyChecklist()
+// dikasih updatedAt = "sekarang" sehingga keliatan paling baru.
+function isEmptyChecklist(c) {
+  return (
+    !c.locked &&
+    !c.submittedAt &&
+    Object.keys(c.values || {}).length === 0 &&
+    Object.keys(c.categoryDone || {}).length === 0
+  );
+}
+
 export function pickNewerChecklist(incoming, current) {
   if (!incoming) return current;
   if (!current || !current.key) return incoming;
   if (incoming.key !== current.key) return incoming;
+  // Guard utama: checklist kosong tidak boleh menimpa checklist yang sudah
+  // ada isinya, walau metadata updatedAt-nya bilang "lebih baru" — kalau
+  // ini kejadian, hampir pasti incoming itu snapshot basi/race, bukan aksi
+  // user yang sengaja mengosongkan data (mengosongkan data selalu lewat
+  // reopenCategory yang cuma ubah categoryDone, values tetap ada).
+  if (isEmptyChecklist(incoming) && !isEmptyChecklist(current)) return current;
   if (!incoming.updatedAt || !current.updatedAt) return incoming;
   return new Date(incoming.updatedAt) >= new Date(current.updatedAt) ? incoming : current;
 }
