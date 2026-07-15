@@ -4,10 +4,12 @@ import {
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
   Loader2, RotateCcw, Flame, LogOut, ShieldCheck, Coffee,
   Info, Zap, Calendar, Phone, Ban, FileText, Clock,
+  RefreshCw, X, Sparkles,
 } from 'lucide-react';
 import { supabase, isConfigured } from './supabase.js';
 import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } from './utils.js';
 import StockChecklistCard from './StockChecklist.jsx';
+import { APP_VERSION, formatVersionShort, formatVersionFull, forceRefreshApp, checkForNewBuild } from './appUpdate.js';
 
 // TODO: ganti 3 angka ini dengan koordinat outlet ASLI kamu.
 const OUTLET_LAT = Number(import.meta.env.VITE_OUTLET_LAT) || -6.2607;
@@ -180,11 +182,155 @@ function CenteredMessage({ children }) {
   );
 }
 
+// ── Cek update tersedia ───────────────────────────────────────────────────────
+// Poll /index.html tiap 5 menit + tiap kali tab balik ke foreground (visibilitychange
+// → 'visible'), bandingkan meta tag app-build di server vs APP_VERSION yang lagi
+// jalan di browser sekarang. 5 menit dipilih karena ini bukan app real-time —
+// cukup sering buat karyawan gak kelamaan mekek versi lama, tapi gak terlalu
+// sering sampai boros request tiap buka index.html. Cek pas tab balik ke foreground
+// itu yang paling kepake di real life: HP karyawan biasanya app-nya dibuka di
+// background lama (nyampur sama WA, dll), baru dibuka lagi pas mau absen —
+// momen itu paling pas buat langsung kasih tau kalau ada versi baru.
+function useAppUpdateCheck() {
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const check = async () => {
+      const serverVersion = await checkForNewBuild();
+      if (cancelled || !serverVersion) return;
+      if (serverVersion !== APP_VERSION) setUpdateAvailable(true);
+    };
+
+    check();
+    const interval = setInterval(check, 5 * 60 * 1000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') check();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
+  return updateAvailable;
+}
+
+// ── Banner "Update tersedia" ─────────────────────────────────────────────────
+// Muncul nempel di atas layar begitu useAppUpdateCheck ketemu versi baru di
+// server. Sengaja gak auto-refresh sendiri (bisa motong absen karyawan yang
+// lagi di tengah proses isi form/upload foto) — cuma kasih tau + tombol,
+// karyawan yang putuskan kapan mau refresh.
+function UpdateAvailableBanner({ onRefresh, refreshing }) {
+  return (
+    <div className="fixed top-0 inset-x-0 z-50 bg-orange-600 text-white px-4 py-2.5 flex items-center gap-2 shadow-lg text-sm">
+      <Sparkles className="w-4 h-4 shrink-0" />
+      <span className="flex-1 font-medium">Ada update baru untuk app ini</span>
+      <button
+        onClick={onRefresh}
+        disabled={refreshing}
+        className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 disabled:opacity-60 px-3 py-1 rounded-lg font-bold text-xs shrink-0"
+      >
+        {refreshing ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="w-3.5 h-3.5" />
+        )}
+        {refreshing ? 'Memuat...' : 'Refresh Sekarang'}
+      </button>
+    </div>
+  );
+}
+
+// ── Badge versi + force refresh manual ───────────────────────────────────────
+// Badge kecil selalu nempel di pojok kanan bawah layar (di semua state app:
+// loading, config-error, form) — nunjukin versi build yang LAGI JALAN di HP
+// ini saat ini, tap buat buka detail + tombol "Refresh Paksa" manual. Ini
+// jawaban buat "gak bisa Ctrl+Shift+R di HP" — tombol ini yang gantiin,
+// dari appUpdate.js (forceRefreshApp): hapus Cache Storage + unregister
+// service worker + reload dengan cache-busting query param.
+function AppVersionBadge() {
+  const [open, setOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleForceRefresh = async () => {
+    setRefreshing(true);
+    await forceRefreshApp(); // ini navigasi ulang halaman, jadi komponen ini akan unmount sendiri
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="fixed bottom-2 right-2 z-40 text-[10px] font-mono text-stone-400 bg-white/80 backdrop-blur px-2 py-1 rounded-md border border-stone-200 shadow-sm active:scale-95 transition"
+      >
+        {formatVersionShort()}
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4"
+          onClick={() => !refreshing && setOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl w-full max-w-sm p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-3">
+              <div>
+                <p className="text-sm font-bold text-stone-800">Info Versi App</p>
+                <p className="text-xs text-stone-400 mt-0.5">{formatVersionFull()}</p>
+              </div>
+              <button
+                onClick={() => !refreshing && setOpen(false)}
+                className="text-stone-400 hover:text-stone-600 p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-stone-500 leading-relaxed mb-4">
+              Kalau app kerasa aneh/nyangkut atau abis ada perbaikan baru tapi
+              belum keliatan, coba refresh paksa di bawah ini — HP kadang
+              nyimpen cache versi lama, ini bakal bersihin & muat ulang dari
+              awal (setara Ctrl+Shift+R di laptop).
+            </p>
+
+            <button
+              onClick={handleForceRefresh}
+              disabled={refreshing}
+              className="w-full flex items-center justify-center gap-2 bg-orange-600 hover:bg-orange-700 disabled:opacity-60 text-white font-bold text-sm py-2.5 rounded-xl transition"
+            >
+              {refreshing ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              {refreshing ? 'Memuat ulang...' : 'Refresh Paksa'}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── App root ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [appStep, setAppStep] = useState('loading'); // loading | form | config-error
   const [employees, setEmployees] = useState([]);
   const [loadErr, setLoadErr] = useState('');
+  const updateAvailable = useAppUpdateCheck();
+  const [bannerRefreshing, setBannerRefreshing] = useState(false);
+
+  const handleBannerRefresh = async () => {
+    setBannerRefreshing(true);
+    await forceRefreshApp();
+  };
 
   useEffect(() => {
     if (!isConfigured()) {
@@ -209,26 +355,35 @@ export default function App() {
     })();
   }, []);
 
+  let body;
   if (appStep === 'loading') {
-    return (
+    body = (
       <CenteredMessage>
         <Loader2 className="w-6 h-6 animate-spin text-stone-400" />
         <p className="text-xs text-stone-400">Memuat...</p>
       </CenteredMessage>
     );
-  }
-
-  if (appStep === 'config-error') {
-    return (
+  } else if (appStep === 'config-error') {
+    body = (
       <CenteredMessage>
         <AlertTriangle className="w-9 h-9 text-red-400" />
         <p className="text-sm font-bold text-stone-700">Belum bisa terhubung</p>
         <p className="text-xs text-stone-400">{loadErr || 'Konfigurasi server belum diatur. Hubungi admin toko.'}</p>
       </CenteredMessage>
     );
+  } else {
+    body = <EmployeeFlow employees={employees} />;
   }
 
-  return <EmployeeFlow employees={employees} />;
+  return (
+    <>
+      {updateAvailable && (
+        <UpdateAvailableBanner onRefresh={handleBannerRefresh} refreshing={bannerRefreshing} />
+      )}
+      {body}
+      <AppVersionBadge />
+    </>
+  );
 }
 
 // ── EmployeeFlow — stepper 3 langkah (Nama → Selfie → Lokasi) ────────────────

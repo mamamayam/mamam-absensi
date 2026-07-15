@@ -13,7 +13,7 @@ import {
   completeCategory, reopenCategory, isCategoryFilledComplete, categoryRequiredProgress,
   isChecklistComplete, isChecklistLocked, pickNewerChecklist,
   submitChecklist, markShared,
-  formatWhatsAppText, buildWhatsAppShareUrl,
+  formatWhatsAppText, buildWhatsAppShareUrl, hasShoppableQty,
   reorderCategory, reorderItem, moveItemToCategory,
 } from './stockChecklist.js';
 
@@ -23,6 +23,88 @@ const STOCK_ADMIN_NAME = 'Agung Prayoga';
 
 function isStockAdmin(name) {
   return (name || '').trim().toLowerCase() === STOCK_ADMIN_NAME.toLowerCase();
+}
+
+// ── Ringkasan hasil checklist yang sudah di-share, ditampilkan LANGSUNG di
+// app (bukan cuma di teks WA) — dikelompokkan per kategori sama seperti teks
+// WA, tapi dalam bentuk list yang lebih gampang dipindai matanya (avatar
+// angka + nama + qty rata kanan) daripada baca paragraf teks panjang. Default
+// collapsed supaya card tidak langsung panjang begitu locked, tapi tetap
+// menampilkan ringkasan total di header row-nya walau belum dibuka.
+function ShareResultSummary({ checklist, master }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const categoriesWithFilled = master.categories
+    .map((cat) => {
+      const filledItems = cat.items.filter((it) => hasShoppableQty(checklist.values[it.id]));
+      return { ...cat, filledItems };
+    })
+    .filter((cat) => cat.filledItems.length > 0);
+
+  const totalItems = categoriesWithFilled.reduce((sum, cat) => sum + cat.filledItems.length, 0);
+
+  if (totalItems === 0) {
+    // Kalau ini kejadian, berarti values checklist yang locked ini beneran
+    // kosong (bukan bug tampilan) — kasih tahu jelas alih-alih diam-diam
+    // menampilkan kotak kosong, supaya cepat ketauan kalau ada masalah data.
+    return (
+      <div className="mt-3 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5 text-left">
+        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+        <p className="text-xs text-amber-700 font-medium leading-relaxed">
+          Belum ada item stock yang tersimpan untuk checklist ini. Coba refresh halaman.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 border border-stone-200 rounded-xl overflow-hidden text-left">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between px-3.5 py-2.5 bg-stone-50 hover:bg-stone-100 transition"
+      >
+        <span className="text-xs font-bold text-stone-600">
+          Hasil Checklist · {totalItems} item, {categoriesWithFilled.length} kategori
+        </span>
+        {expanded ? (
+          <ChevronUp className="w-3.5 h-3.5 text-stone-400" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 text-stone-400" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="px-3.5 py-3 space-y-3 max-h-80 overflow-y-auto">
+          {categoriesWithFilled.map((cat) => (
+            <div key={cat.id}>
+              <p className="text-[11px] font-bold text-orange-600 uppercase tracking-wide mb-1">
+                {cat.name}
+              </p>
+              <div className="space-y-1">
+                {cat.filledItems.map((it, idx) => {
+                  const v = checklist.values[it.id];
+                  return (
+                    <div
+                      key={it.id}
+                      className="flex items-center gap-2 text-xs text-stone-700 bg-stone-50 rounded-lg px-2.5 py-1.5"
+                    >
+                      <span className="w-4 h-4 rounded-full bg-stone-200 text-stone-500 text-[10px] font-bold flex items-center justify-center shrink-0">
+                        {idx + 1}
+                      </span>
+                      <span className="flex-1 text-left truncate">{it.name}</span>
+                      <span className="font-bold text-stone-800 shrink-0">
+                        {v.qty} {it.unit || ''}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Kartu ringkas + expand: dipakai di layar utama sebelum absen ────────────
@@ -303,6 +385,22 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
     // Agung Prayoga boleh bypass kelengkapan checklist (misal buru-buru / item
     // fisiknya belum sempat dicek semua) — selain dia, tetap wajib complete dulu.
     if ((!complete && !canBypassChecklist) || locked) return;
+    // Guard tambahan KHUSUS jalur bypass: "belum lengkap semua kategori" itu
+    // beda jauh dari "belum ada satu item pun yang diisi". Yang pertama wajar
+    // (misal buru-buru, beberapa item fisik belum sempat dicek), tapi yang
+    // kedua hampir pasti ke-tap tidak sengaja — dan kalau lolos, hasil
+    // share-nya jadi pesan WA isinya cuma header tanpa body sama sekali
+    // (persis laporan bug: bubble "Stock List — tanggal / Untuk belanja
+    // besok" tanpa list item apa pun di bawahnya). Makanya submit checklist
+    // yang benar-benar 0 item terisi WAJIB dikonfirmasi dulu, walau oleh
+    // Agung Prayoga sekalipun.
+    const hasAnyFilledItem = Object.values(checklist.values || {}).some(hasShoppableQty);
+    if (!hasAnyFilledItem && canBypassChecklist) {
+      const confirmed = window.confirm(
+        'Checklist ini belum ada satu item pun yang diisi. Tetap lanjut & bagikan ke WhatsApp kosong?'
+      );
+      if (!confirmed) return;
+    }
     const optimistic = {
       ...checklist,
       submittedAt: new Date().toISOString(),
@@ -321,14 +419,60 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
 
   const handleShare = async () => {
     if (locked) return;
-    const text = formatWhatsAppText(checklist, master);
-    window.open(buildWhatsAppShareUrl(text), '_blank');
+    // Guard yang sama seperti di handleSubmit — kalau entah bagaimana ada
+    // checklist yang lolos ke tahap "sudah submitted" tapi values-nya 0 item
+    // terisi (misal data lama sebelum guard di handleSubmit ini ada), jangan
+    // biarkan tombol share langsung buka WhatsApp dengan pesan isinya cuma
+    // header tanpa body. Konfirmasi dulu.
+    const hasAnyFilledItem = Object.values(checklist.values || {}).some(hasShoppableQty);
+    if (!hasAnyFilledItem) {
+      const confirmed = window.confirm(
+        'Checklist ini belum ada satu item pun yang diisi. Tetap bagikan ke WhatsApp kosong?'
+      );
+      if (!confirmed) return;
+    }
+    // Snapshot values checklist SEBELUM markShared dipanggil — dipakai sebagai
+    // fallback teks kalau ternyata hasil markShared datang dengan values
+    // kosong (lihat catatan di bawah). `checklist` di closure ini idealnya
+    // sudah berisi semua isian (completeCategory selalu di-await sebelum tab
+    // "Bagikan" bisa diklik), jadi ini snapshot yang valid untuk dipakai.
+    const preShareChecklist = checklist;
     setJustShared(true);
     try {
       const saved = await markShared(supabase, checklist);
-      setChecklist((prev) => pickNewerChecklist(saved, prev)); // locked=true — otomatis kebuka gate absen di device ini,
+      // CATATAN BUG LAMA (sudah diperbaiki): dulu di sini teks WA langsung
+      // dibentuk dari `checklist` closure SEBELUM markShared selesai, lalu
+      // window.open dipanggil duluan. Kalau hasil RPC share_stock_checklist
+      // dari server balik dengan kolom `values` kosong/parsial (server cuma
+      // meng-update locked/shared_at), pickNewerChecklist yang lama juga
+      // punya celah — checklist locked dianggap otomatis "tidak kosong" —
+      // sehingga state locked-tapi-kosong itu KETIMPA jadi state aktif. Hasil
+      // gabungannya: teks share pertama kali sering muncul kosong, dan baru
+      // normal lagi setelah user refresh (yang narik ulang row utuh dari
+      // server) lalu share ulang.
+      //
+      // Sekarang pickNewerChecklist sudah dibenerin untuk selalu melindungi
+      // values yang sudah terisi terlepas dari status locked (lihat
+      // stockChecklist.js). Sebagai lapis kedua di sini: metadata (locked,
+      // sharedAt, dst) TETAP diambil dari `saved` karena itu valid — RPC-nya
+      // berhasil di server — cuma `values`-nya saja yang di-fallback ke
+      // snapshot pre-share kalau ternyata kosong, supaya locked-state di UI
+      // selalu konsisten dengan server walau values sempat bermasalah.
+      const merged =
+        Object.keys(saved.values || {}).length > 0
+          ? saved
+          : { ...saved, values: preShareChecklist.values };
+      const text = formatWhatsAppText(merged, master);
+      window.open(buildWhatsAppShareUrl(text), '_blank');
+      setChecklist((prev) => pickNewerChecklist(merged, prev)); // locked=true — otomatis kebuka gate absen di device ini,
       setChecklistSyncError(''); // dan lewat realtime, di semua device lain juga.
     } catch (err) {
+      // markShared gagal (network/RPC error) — tetap buka WA pakai data lokal
+      // yang ada supaya karyawan tidak kehilangan momentum share, tapi
+      // checklist belum ter-lock di server sehingga tombol akan tetap aktif
+      // untuk dicoba lagi.
+      const text = formatWhatsAppText(preShareChecklist, master);
+      window.open(buildWhatsAppShareUrl(text), '_blank');
       setChecklistSyncError('Gagal mengunci checklist di server. Coba tekan bagikan lagi.');
     }
   };
@@ -666,6 +810,13 @@ export default function StockChecklistCard({ onGateStatusChange, currentEmployee
                 )}
                 {shareAgainLoading ? 'Mengambil data...' : 'Bagikan Lagi ke WhatsApp'}
               </button>
+
+              {/* Ringkasan hasil checklist yang di-share — supaya bisa dicek
+                  langsung di app tanpa perlu buka WhatsApp lagi, dan supaya
+                  kalau values ternyata kosong (harusnya sudah tidak mungkin
+                  lagi setelah fix pickNewerChecklist), itu langsung kelihatan
+                  di sini juga, bukan cuma pas generate teks WA. */}
+              <ShareResultSummary checklist={checklist} master={master} />
             </div>
           )}
 

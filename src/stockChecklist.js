@@ -421,33 +421,40 @@ export function rowToChecklist(row) {
 // updatedAt versi baru >= yang sedang ada. Kalau salah satu tidak punya
 // updatedAt (data lama / edge case), anggap aman untuk diterima (fail-open,
 // supaya tidak ada state yang "macet" gara-gara metadata hilang) — KECUALI
-// kalau incoming itu ternyata checklist KOSONG (lihat isEmptyChecklist di
-// bawah), karena checklist kosong nimpa checklist yang sudah terisi adalah
-// justru bug paling merusak yang mau dicegah fungsi ini (values keliatan
-// hilang total pas share/refresh). Sumber checklist kosong yang "menang"
-// gara-gara updatedAt basi/hilang: loadActiveChecklistFromServer() fallback
-// ke emptyChecklist() waktu row belum sempat ke-commit/ke-baca (race saat
-// RPC completeCategory device lain masih berjalan), lalu emptyChecklist()
-// dikasih updatedAt = "sekarang" sehingga keliatan paling baru.
-function isEmptyChecklist(c) {
-  return (
-    !c.locked &&
-    !c.submittedAt &&
-    Object.keys(c.values || {}).length === 0 &&
-    Object.keys(c.categoryDone || {}).length === 0
-  );
+// kalau incoming itu ternyata checklist yang VALUES-nya kosong (lihat
+// hasEmptyValues di bawah), karena values kosong nimpa values yang sudah
+// terisi adalah justru bug paling merusak yang mau dicegah fungsi ini
+// (values keliatan hilang total pas share/refresh). Sumber values kosong
+// yang "menang" gara-gara updatedAt basi/hilang, dua jalur:
+// 1) loadActiveChecklistFromServer() fallback ke emptyChecklist() waktu row
+//    belum sempat ke-commit/ke-baca (race saat RPC completeCategory device
+//    lain masih berjalan), lalu emptyChecklist() dikasih updatedAt =
+//    "sekarang" sehingga keliatan paling baru.
+// 2) markShared()/share_stock_checklist RPC di server cuma meng-update
+//    kolom locked/shared_at dan bisa saja balikin row yang kolom `values`-nya
+//    tidak ikut ter-select penuh — hasilnya row locked=true tapi values={}.
+//    Ini PERSIS kasus "share pertama teksnya kosong, refresh+share ulang baru
+//    muncul": incoming locked+kosong menang lewat pickNewerChecklist karena
+//    dulu isEmptyChecklist() men-syaratkan !locked (checklist locked otomatis
+//    dianggap "tidak kosong" walau values-nya kosong), jadi guard di bawah
+//    ini tidak pernah nyala untuk hasil markShared. Makanya cek "kosong"
+//    sekarang HANYA lihat values, terlepas dari locked/submittedAt.
+function hasEmptyValues(c) {
+  return Object.keys(c.values || {}).length === 0;
 }
 
 export function pickNewerChecklist(incoming, current) {
   if (!incoming) return current;
   if (!current || !current.key) return incoming;
   if (incoming.key !== current.key) return incoming;
-  // Guard utama: checklist kosong tidak boleh menimpa checklist yang sudah
-  // ada isinya, walau metadata updatedAt-nya bilang "lebih baru" — kalau
-  // ini kejadian, hampir pasti incoming itu snapshot basi/race, bukan aksi
-  // user yang sengaja mengosongkan data (mengosongkan data selalu lewat
-  // reopenCategory yang cuma ubah categoryDone, values tetap ada).
-  if (isEmptyChecklist(incoming) && !isEmptyChecklist(current)) return current;
+  // Guard utama: values kosong tidak boleh menimpa values yang sudah ada
+  // isinya, walau metadata updatedAt-nya bilang "lebih baru" ATAU incoming
+  // itu locked (hasil share) — kalau ini kejadian, hampir pasti incoming
+  // adalah snapshot basi/parsial dari RPC yang tidak membawa kolom values
+  // lengkap, bukan aksi user yang sengaja mengosongkan data (mengosongkan
+  // data selalu lewat reopenCategory yang cuma ubah categoryDone, values
+  // tetap ada).
+  if (hasEmptyValues(incoming) && !hasEmptyValues(current)) return current;
   if (!incoming.updatedAt || !current.updatedAt) return incoming;
   return new Date(incoming.updatedAt) >= new Date(current.updatedAt) ? incoming : current;
 }
@@ -754,29 +761,63 @@ export async function listChecklistHistory(supabase) {
   return (data || []).map(rowToChecklist);
 }
 
-// Format teks untuk dibagikan ke WhatsApp — grup per kategori, nama - jumlah - satuan.
-// Item yang belum diisi (qty kosong/null, dan bukan skipped-dengan-nilai) TIDAK
-// ikut dikirim, supaya pesan WA cuma berisi item yang benar-benar ada isinya
-// dan gampang dibaca.
+// Item dianggap "sudah diisi" (dan karenanya layak muncul di teks WA share /
+// ringkasan hasil share) kalau qty-nya terisi angka valid — TERMASUK 0.
+// qty = 0 artinya stock item itu HABIS/SISA NOL, yang justru berarti perlu
+// dibelanjakan, bukan sebaliknya — jadi qty = 0 TIDAK disaring keluar di
+// sini. Yang disaring keluar cuma item yang beneran belum diisi sama sekali
+// (qty null/'') atau ditandai skipped. Dipakai bersama oleh
+// formatWhatsAppText() dan ShareResultSummary (StockChecklist.jsx) biar
+// keduanya selalu konsisten menampilkan item yang sama.
+export function hasShoppableQty(value) {
+  if (!value || value.skipped) return false;
+  if (value.qty === null || value.qty === '') return false;
+  const n = Number(value.qty);
+  return !Number.isNaN(n);
+}
+
+// Format teks untuk dibagikan ke WhatsApp — grup per kategori, nomor urut,
+// nama - jumlah - satuan, ditutup ringkasan total item & kategori. Item yang
+// belum diisi (qty kosong/null, dan bukan skipped-dengan-nilai) TIDAK ikut
+// dikirim — tapi qty = 0 TETAP ikut ditampilkan (lihat hasShoppableQty di
+// atas), supaya pesan WA cuma berisi item yang benar-benar ada isinya dan
+// gampang dibaca — WhatsApp merender *tebal* dan _miring_ dari markdown ini,
+// jadi format harus tetap pakai sintaks itu (bukan HTML/markdown biasa).
 export function formatWhatsAppText(checklist, master) {
   const dateStr = checklist.dateStr;
   const [y, m, d] = dateStr.split('-');
-  const lines = [`*Stock List — ${d}/${m}/${y}*`, '_Untuk belanja besok_', ''];
+  const lines = [
+    `🛒 *STOCK LIST BELANJA*`,
+    `📅 ${d}/${m}/${y} — _untuk belanja besok_`,
+    '',
+  ];
+
+  let totalItems = 0;
+  let totalCategories = 0;
 
   for (const cat of master.categories) {
     if (cat.items.length === 0) continue;
-    const filledItems = cat.items.filter((it) => {
-      const v = checklist.values[it.id];
-      return v && v.qty !== null && v.qty !== '' && !v.skipped;
-    });
-    if (filledItems.length === 0) continue; // kategori tanpa item terisi dilewati semua
+    const filledItems = cat.items.filter((it) => hasShoppableQty(checklist.values[it.id]));
+    if (filledItems.length === 0) continue; // kategori tanpa item yang perlu dibeli dilewati semua
 
-    lines.push(`*${cat.name}*`);
-    for (const it of filledItems) {
+    totalCategories += 1;
+    lines.push(`*${cat.name.toUpperCase()}*`);
+    filledItems.forEach((it, idx) => {
       const v = checklist.values[it.id];
-      lines.push(`- ${it.name}: ${v.qty} ${it.unit || ''}`.trim());
-    }
+      lines.push(`${idx + 1}. ${it.name} — *${v.qty}${it.unit ? ` ${it.unit}` : ''}*`);
+    });
+    totalItems += filledItems.length;
     lines.push('');
+  }
+
+  if (totalItems === 0) {
+    lines.push('_(tidak ada item yang perlu dibelanjakan)_');
+  } else {
+    lines.push(`✅ Total *${totalItems} item* dari *${totalCategories} kategori*`);
+  }
+
+  if (checklist.submittedBy) {
+    lines.push(`✍️ Diisi oleh: ${checklist.submittedBy}`);
   }
 
   return lines.join('\n').trim();
