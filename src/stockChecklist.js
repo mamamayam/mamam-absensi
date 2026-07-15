@@ -776,13 +776,23 @@ export function hasShoppableQty(value) {
   return !Number.isNaN(n);
 }
 
-// Format teks untuk dibagikan ke WhatsApp — grup per kategori, nomor urut,
-// nama - jumlah - satuan, ditutup ringkasan total item & kategori. Item yang
-// belum diisi (qty kosong/null, dan bukan skipped-dengan-nilai) TIDAK ikut
+// Format teks untuk dibagikan ke WhatsApp — grup per kategori, ditampilkan
+// sebagai blok monospace (``` ```) biar WhatsApp me-render-nya rata kolom
+// kayak tabel beneran (titik dua semua sejajar), bukan cuma daftar teks
+// biasa yang angkanya loncat-loncat posisinya tiap baris. Trade-off yang
+// disengaja: teks DI DALAM blok ``` ``` tidak diproses markdown WhatsApp,
+// jadi *tebal*/_miring_ TIDAK berlaku di situ — makanya angka qty tetap
+// terbaca jelas lewat alignment kolom, bukan lewat bold. Item yang belum
+// diisi (qty kosong/null, dan bukan skipped-dengan-nilai) TIDAK ikut
 // dikirim — tapi qty = 0 TETAP ikut ditampilkan (lihat hasShoppableQty di
-// atas), supaya pesan WA cuma berisi item yang benar-benar ada isinya dan
-// gampang dibaca — WhatsApp merender *tebal* dan _miring_ dari markdown ini,
-// jadi format harus tetap pakai sintaks itu (bukan HTML/markdown biasa).
+// atas), karena qty = 0 artinya stock habis dan justru perlu dibelanjakan.
+const MAX_NAME_COL_WIDTH = 22; // batas lebar kolom nama, biar blok tabel gak melebar aneh di layar HP kecil kalau ada nama item kepanjangan (nama asli tetap utuh di app, cuma potongan tampilan WA ini yang dipendekin)
+
+function truncateForTable(name) {
+  if (name.length <= MAX_NAME_COL_WIDTH) return name;
+  return name.slice(0, MAX_NAME_COL_WIDTH - 1) + '…';
+}
+
 export function formatWhatsAppText(checklist, master) {
   const dateStr = checklist.dateStr;
   const [y, m, d] = dateStr.split('-');
@@ -802,10 +812,21 @@ export function formatWhatsAppText(checklist, master) {
 
     totalCategories += 1;
     lines.push(`*${cat.name.toUpperCase()}*`);
+
+    // Lebar kolom nama = nama TERPANJANG di kategori ini (setelah dipotong
+    // ke MAX_NAME_COL_WIDTH), supaya titik dua semua baris sejajar persis —
+    // ini yang bikin efek "tabel" kerasa, bukan cuma daftar rata kiri biasa.
+    const displayNames = filledItems.map((it) => truncateForTable(it.name));
+    const colWidth = Math.max(...displayNames.map((n) => n.length));
+
+    lines.push('```');
     filledItems.forEach((it, idx) => {
       const v = checklist.values[it.id];
-      lines.push(`${idx + 1}. ${it.name} — *${v.qty}${it.unit ? ` ${it.unit}` : ''}*`);
+      const namePadded = displayNames[idx].padEnd(colWidth, ' ');
+      lines.push(`${namePadded} : ${v.qty}${it.unit ? ` ${it.unit}` : ''}`);
     });
+    lines.push('```');
+
     totalItems += filledItems.length;
     lines.push('');
   }
