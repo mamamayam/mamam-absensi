@@ -294,10 +294,7 @@ function AppVersionBadge() {
             </div>
 
             <p className="text-xs text-stone-500 leading-relaxed mb-4">
-              Kalau app kerasa aneh/nyangkut atau abis ada perbaikan baru tapi
-              belum keliatan, coba refresh paksa di bawah ini — HP kadang
-              nyimpen cache versi lama, ini bakal bersihin & muat ulang dari
-              awal (setara Ctrl+Shift+R di laptop).
+              Fungsi pengganti Ctrl+Shift+R di HP: hapus cache, unregister service worker, dan reload paksa app dari server.
             </p>
 
             <button
