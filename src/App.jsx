@@ -335,19 +335,16 @@ export default function App() {
       return;
     }
     (async () => {
-      const { data, error } = await supabase
-        .from('app_config')
-        .select('value')
-        .eq('key', 'employees')
-        .maybeSingle();
+      // Daftar karyawan dikelola di mamam-pos (layar Karyawan); fungsi ini hanya mengembalikan
+      // id, nama, dan peran karyawan aktif (tanpa tarif/alamat/telepon).
+      const { data, error } = await supabase.rpc('absen_daftar_karyawan');
 
       if (error) {
         setLoadErr('Gagal memuat data karyawan. Coba refresh halaman ini.');
         setAppStep('config-error');
         return;
       }
-      const list = Array.isArray(data?.value) ? data.value : [];
-      setEmployees(list.filter((e) => !e.deletedAt));
+      setEmployees(Array.isArray(data) ? data : []);
       setAppStep('form');
     })();
   }, []);
@@ -424,7 +421,7 @@ function EmployeeFlow({ employees }) {
     try {
       const todayStr = getTodayStr();
       const { data: rows } = await supabase
-        .from('attendanceLog')
+        .from('attendance_log')
         .select('payload')
         .eq('payload->>employeeId', emp.id)
         .eq('payload->>dateStr', todayStr);
@@ -522,7 +519,7 @@ function EmployeeFlow({ employees }) {
     try {
       const todayStr = getTodayStr();
       const { data: rows, error: logErr } = await supabase
-        .from('attendanceLog')
+        .from('attendance_log')
         .select('payload')
         .eq('payload->>employeeId', employee.id)
         .eq('payload->>dateStr', todayStr);
@@ -602,7 +599,7 @@ function EmployeeFlow({ employees }) {
       const nowIso = new Date().toISOString();
       const recordId = generateId();
 
-      const { error: insertErr } = await supabase.from('attendanceLog').upsert(
+      const { error: insertErr } = await supabase.from('attendance_log').upsert(
         {
           id: recordId,
           payload: {

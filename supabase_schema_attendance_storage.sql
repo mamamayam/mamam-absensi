@@ -1,3 +1,7 @@
+-- CATATAN (26 Okt 2026): file ini sudah TIDAK dipakai. Bucket foto absen sekarang dibuat oleh
+-- migrasi 020 di repo mamam-pos (supabase/migrations/020_absensi.sql) di project Supabase C.
+-- Disimpan hanya sebagai arsip project lama (mamam-global).
+
 -- =========================================================================
 -- MAMAM KASIR — Migrasi tambahan #2: storage bucket buat foto selfie absen
 -- Jalankan SEKALI di Supabase SQL Editor (project yang sama).
