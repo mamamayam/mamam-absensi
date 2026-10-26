@@ -1,7 +1,7 @@
 // ── Stock Checklist ────────────────────────────────────────────────────────
 //
 // Struktur data:
-//  - Master kategori & item → disimpan di Supabase, tabel "app_config",
+//  - Master kategori & item → disimpan di Supabase, tabel "app_settings" (project yang sama dengan mamam-pos),
 //    row dengan key = 'stockMaster', kolom value (JSONB) = { categories: [...] }.
 //    Ini SINKRON ke semua device (laptop admin, HP kasir, dll) dan otomatis
 //    ter-update di device lain lewat Supabase Realtime (lihat subscribeStockMaster).
@@ -87,7 +87,7 @@ export function loadMasterCached() {
 
 export async function loadMasterFromServer(supabase) {
   const { data, error } = await supabase
-    .from('app_config')
+    .from('app_settings')
     .select('value')
     .eq('key', STOCK_MASTER_CONFIG_KEY)
     .maybeSingle();
@@ -110,7 +110,7 @@ export async function loadMasterFromServer(supabase) {
 export async function saveMasterToServer(supabase, master) {
   saveMasterToCache(master); // optimistic: cache lokal langsung update
   const { error } = await supabase
-    .from('app_config')
+    .from('app_settings')
     .upsert({ key: STOCK_MASTER_CONFIG_KEY, value: master }, { onConflict: 'key' });
 
   if (error) {
@@ -119,7 +119,7 @@ export async function saveMasterToServer(supabase, master) {
   return master;
 }
 
-// Subscribe ke perubahan row stockMaster di app_config lewat Supabase Realtime.
+// Subscribe ke perubahan row stockMaster di app_settings lewat Supabase Realtime.
 // onRemoteChange(newMaster) dipanggil setiap ada perubahan dari device lain.
 // onResync (opsional) dipanggil setiap channel berhasil (re)connect — termasuk
 // SETIAP KALI setelah koneksi realtime sempat putus-nyambung (misal wifi
@@ -133,7 +133,7 @@ export function subscribeStockMaster(supabase, onRemoteChange, onResync) {
     .channel('stock-master-changes')
     .on(
       'postgres_changes',
-      { event: '*', schema: 'public', table: 'app_config', filter: `key=eq.${STOCK_MASTER_CONFIG_KEY}` },
+      { event: '*', schema: 'public', table: 'app_settings', filter: `key=eq.${STOCK_MASTER_CONFIG_KEY}` },
       (payload) => {
         const value = payload.new?.value;
         if (value && Array.isArray(value.categories)) {
