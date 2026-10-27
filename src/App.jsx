@@ -8,7 +8,8 @@ import {
 } from 'lucide-react';
 import { supabase, isConfigured } from './supabase.js';
 import { getTodayStr, formatTime, generateId, distanceMeters, compressImage } from './utils.js';
-import StockChecklistCard from './StockChecklist.jsx';
+import StockGateCard from './StockGateCard.jsx';
+import { useStockGate } from './useStockGate.js';
 import { APP_VERSION, formatVersionShort, formatVersionFull, forceRefreshApp, checkForNewBuild } from './appUpdate.js';
 
 // TODO: ganti 3 angka ini dengan koordinat outlet ASLI kamu.
@@ -403,10 +404,11 @@ function EmployeeFlow({ employees }) {
   const [submitError, setSubmitError] = useState('');
   const [done, setDone] = useState(null); // { type, time, flagged }
 
-  // Gate "Absen Pulang" — dikunci sampai Stock List checklist selesai diisi.
-  const [stockGate, setStockGate] = useState({ gateOpen: true, hasItems: false, complete: false });
-  // Notif yang muncul begitu gate baru saja kebuka (checklist selesai dibagikan
-  // ke WhatsApp) — supaya karyawan yang lagi nunggu di layar langsung tahu,
+  // Gate "Absen Pulang" — dikunci sampai Stok Belanja hari ini disimpan di Mamam POS (atau pakai kode bypass
+  // dari owner). Mulai dicek setelah ada absen masuk hari ini. Lihat useStockGate.js.
+  const stockGate = useStockGate(Boolean(todayStatus?.hasMasuk));
+  // Notif yang muncul begitu gate baru saja kebuka (stok disimpan di POS / kode bypass dipakai)
+  // — supaya karyawan yang lagi nunggu di layar langsung tahu,
   // gak perlu manual cek/klik ulang tab "Pulang".
   const [stockGateJustOpened, setStockGateJustOpened] = useState(false);
   const prevGateOpenRef = useRef(stockGate.gateOpen);
@@ -486,9 +488,8 @@ function EmployeeFlow({ employees }) {
 
   const sudahLengkapHariIni = todayStatus?.lastType === 'keluar';
 
-  // Begitu gate absen pulang baru saja kebuka (checklist stock selesai &
-  // dibagikan ke WhatsApp — bisa dari device sendiri atau device lain lewat
-  // realtime), otomatis pindahkan pilihan ke tab "Pulang" dan tampilkan notif,
+  // Begitu gate absen pulang baru saja kebuka (stok disimpan di Mamam POS oleh siapa pun, atau kode
+  // bypass dipakai), otomatis pindahkan pilihan ke tab "Pulang" dan tampilkan notif,
   // supaya karyawan yang lagi standby di layar (absenType masih 'bolong' karena
   // tab Pulang tadinya ke-disable) tidak perlu ngeh/klik manual sendiri.
   useEffect(() => {
@@ -500,6 +501,12 @@ function EmployeeFlow({ employees }) {
         setAbsenType('keluar');
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stockGate.gateOpen]);
+
+  // Pilihan awal 'keluar' ditentukan sebelum gate selesai dicek. Kalau ternyata gate tertutup, kembalikan ke 'bolong'.
+  useEffect(() => {
+    if (!stockGate.gateOpen && absenType === 'keluar') setAbsenType('bolong');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stockGate.gateOpen]);
 
@@ -572,8 +579,8 @@ function EmployeeFlow({ employees }) {
           setSubmitError('Kamu sudah absen keluar hari ini.');
           return;
         }
-        if (!stockGate.gateOpen) {
-          setSubmitError('Stock List belum selesai diisi. Lengkapi checklist stock dulu sebelum absen pulang.');
+        if (!(await stockGate.recheck())) {
+          setSubmitError('Stok Belanja belum selesai diisi. Buka Mamam POS dan lengkapi dulu sebelum absen pulang.');
           return;
         }
       }
@@ -730,13 +737,12 @@ function EmployeeFlow({ employees }) {
         {/* Body form */}
         <div className="bg-white rounded-b-3xl shadow-xl p-5 pt-6">
 
-          {/* Notif: checklist stock baru saja selesai diisi & dibagikan ke
-              WhatsApp, jadi absen pulang sekarang terbuka. */}
+          {/* Notif: Stok Belanja baru saja disimpan (atau kode bypass dipakai), jadi absen pulang sekarang terbuka. */}
           {stockGateJustOpened && stockGate.gateOpen && !sudahLengkapHariIni && (
             <div className="flex items-center gap-2.5 bg-green-50 border border-green-200 rounded-xl px-3.5 py-3 mb-3">
               <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0" />
               <p className="text-xs text-green-700 font-medium leading-relaxed">
-                Form checklist sudah diisi. Silahkan absen pulang.
+                Absen pulang sudah terbuka. Silakan absen pulang.
               </p>
             </div>
           )}
@@ -769,7 +775,7 @@ function EmployeeFlow({ employees }) {
               </div>
               {!stockGate.gateOpen && (
                 <p className="text-[11px] text-amber-600 text-center mb-3">
-                  Absen pulang terkunci — isi Stock List di bawah dulu.
+                  Absen pulang terkunci — buka Mamam POS dan isi Stok Belanja dulu.
                 </p>
               )}
             </>
@@ -794,9 +800,9 @@ function EmployeeFlow({ employees }) {
             </div>
           )}
 
-          {/* Stock List — hanya tampil setelah ada yang absen masuk hari ini */}
+          {/* Gate Stok Belanja — hanya tampil setelah ada yang absen masuk hari ini */}
           {todayStatus?.hasMasuk && !sudahLengkapHariIni && (
-            <StockChecklistCard onGateStatusChange={setStockGate} currentEmployeeName={employee?.name} />
+            <StockGateCard gate={stockGate} />
           )}
 
           {/* Progress steps */}
